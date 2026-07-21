@@ -1,0 +1,29 @@
+# Virtual Environment
+.venv/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# SQLite
+*.db
+*.sqlite
+
+# Logs
+logs/
+
+# VS Code
+.vscode/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Environment
+.env
+
+# Output
+output/*.csv
+
+# macOS
+.DS_Store
