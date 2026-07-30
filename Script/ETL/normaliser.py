@@ -1,19 +1,34 @@
-import pandas as pd 
+import re
+import pandas as pd
 
 def normalize_year(value):
     """
-    convert different year formats into an integer year.
-    example:
-    '2023' -> 2023
-    2023.0 -> 2023
+    Convert different year formats into an integer year.
+
+    Examples:
+        '2023'      -> 2023
+        2023.0      -> 2023
+        'Dec 2025'  -> 2025
+        'Mar-2018'  -> 2018
+        'FY2021'    -> 2021
     """
+
     if pd.isna(value):
         return None
 
-    try:
-        return int(float(value))
-    except (ValueError,TypeError):
-        return None
+    # Already numeric
+    if isinstance(value, (int, float)):
+        return int(value)
+
+    value = str(value).strip()
+
+    # Find a 4-digit year anywhere in the string
+    match = re.search(r"(19|20)\d{2}", value)
+
+    if match:
+        return int(match.group())
+
+    return None
 
 def normalize_ticker(value):
      """
