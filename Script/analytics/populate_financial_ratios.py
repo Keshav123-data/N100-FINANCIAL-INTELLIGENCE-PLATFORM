@@ -164,4 +164,9 @@ conn.close()
 
 print("financial_ratios populated successfully.")
 
+df.to_csv(
+    "output/financial_ratios.csv",
+    index=False
+)
+
 
