@@ -2,6 +2,7 @@ import sqlite3
 from pathlib import Path
 import os
 from dotenv import load_dotenv
+import pandas as pd
 
 load_dotenv()
 

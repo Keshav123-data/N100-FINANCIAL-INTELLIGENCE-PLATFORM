@@ -1,4 +1,4 @@
-PRAGMA foreign_keys = ON;
+PRAGMA foreign_keys = off;
 
 DROP TABLE IF EXISTS companies;
 DROP TABLE IF EXISTS balancesheet;
@@ -13,9 +13,11 @@ DROP TABLE IF EXISTS peer_groups;
 DROP TABLE IF EXISTS sectors;
 DROP TABLE IF EXISTS stock_prices;
 
+PRAGMA foreign_keys = ON;
+
 CREATE TABLE companies(
 
-id INTEGER PRIMARY KEY,
+id TEXT PRIMARY KEY,
 
 company_logo TEXT,
 
@@ -45,7 +47,7 @@ CREATE TABLE balancesheet(
 
 id INTEGER PRIMARY KEY,
 
-company_id INTEGER,
+company_id TEXT NOT NULL,
 
 year INTEGER,
 
@@ -79,7 +81,7 @@ CREATE TABLE profitandloss(
 
 id INTEGER PRIMARY KEY,
 
-company_id INTEGER,
+company_id TEXT NOT NULL,
 
 year INTEGER,
 
@@ -117,7 +119,7 @@ CREATE TABLE cashflow(
 
 id INTEGER PRIMARY KEY,
 
-company_id INTEGER,
+company_id TEXT NOT NULL,
 
 year INTEGER,
 
@@ -151,7 +153,7 @@ CREATE TABLE analysis (
     roe TEXT,
 
     FOREIGN KEY(company_id)
-        REFERENCES companies(id)
+    REFERENCES companies(id)
 
 );
 
@@ -166,12 +168,8 @@ CREATE TABLE documents (
 
     annual_report TEXT,
 
-    concall_transcript TEXT,
-
-    investor_presentation TEXT,
-
     FOREIGN KEY(company_id)
-        REFERENCES companies(id)
+    REFERENCES companies(id)
 
 );
 
@@ -182,12 +180,12 @@ CREATE TABLE prosandcons (
 
     company_id TEXT NOT NULL,
 
-    category TEXT,
+    pros TEXT,
 
-    description TEXT,
+    cons TEXT,
 
     FOREIGN KEY(company_id)
-        REFERENCES companies(id)
+    REFERENCES companies(id)
 
 );
 
@@ -200,22 +198,34 @@ CREATE TABLE financial_ratios (
 
     year INTEGER,
 
-    pe_ratio REAL,
+    net_profit_margin_pct REAL,
 
-    pb_ratio REAL,
+    operating_profit_margin_pct REAL,
+
+    return_on_equity_pct REAL,
 
     debt_to_equity REAL,
 
-    current_ratio REAL,
+    interest_coverage REAL,
 
-    quick_ratio REAL,
+    asset_turnover REAL,
 
-    return_on_assets REAL,
+    free_cash_flow_cr REAL,
 
-    return_on_equity REAL,
+    capex_cr REAL,
+
+    earnings_per_share REAL,
+
+    book_value_per_share REAL,
+
+    dividend_payout_ratio_pct REAL,
+
+    total_debt_cr REAL,
+
+    cash_from_operations_cr REAL,
 
     FOREIGN KEY(company_id)
-        REFERENCES companies(id)
+    REFERENCES companies(id)
 
 );
 
@@ -228,10 +238,20 @@ CREATE TABLE market_cap (
 
     year INTEGER,
 
-    market_cap REAL,
+    market_cap_crore REAL,
+
+    enterprise_value_crore REAL,
+
+    pe_ratio REAL,
+
+    pb_ratio REAL,
+
+    ev_ebitda REAL,
+
+    dividend_yield_pct REAL,
 
     FOREIGN KEY(company_id)
-        REFERENCES companies(id)
+    REFERENCES companies(id)
 
 );
 
@@ -240,30 +260,14 @@ CREATE TABLE peer_groups (
 
     id INTEGER PRIMARY KEY,
 
+    peer_group_name TEXT,
+
     company_id TEXT NOT NULL,
 
-    peer_company TEXT,
-
-    cmp REAL,
-
-    pe REAL,
-
-    market_cap REAL,
-
-    dividend_yield REAL,
-
-    np_qtr REAL,
-
-    qtr_profit_var REAL,
-
-    sales_qtr REAL,
-
-    qtr_sales_var REAL,
-
-    roce REAL,
+    is_benchmark TEXT,
 
     FOREIGN KEY(company_id)
-        REFERENCES companies(id)
+    REFERENCES companies(id)
 
 );
 
@@ -272,9 +276,18 @@ CREATE TABLE sectors (
 
     id INTEGER PRIMARY KEY,
 
-    sector_name TEXT,
+    company_id TEXT NOT NULL,
 
-    industry_name TEXT
+    broad_sector TEXT,
+
+    sub_sector TEXT,
+
+    index_weight_pct REAL,
+
+    market_cap_category TEXT,
+
+    FOREIGN KEY(company_id)
+    REFERENCES companies(id)
 
 );
 
@@ -285,7 +298,7 @@ CREATE TABLE stock_prices (
 
     company_id TEXT NOT NULL,
 
-    trading_date DATE,
+    date DATE,
 
     open_price REAL,
 
@@ -295,12 +308,12 @@ CREATE TABLE stock_prices (
 
     close_price REAL,
 
-    adjusted_close REAL,
-
     volume INTEGER,
 
+    adjusted_close REAL,
+
     FOREIGN KEY(company_id)
-        REFERENCES companies(id)
+    REFERENCES companies(id)
 
 );
 
