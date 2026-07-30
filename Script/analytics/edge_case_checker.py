@@ -188,7 +188,3 @@ log_file.close()
 conn.close()
 
 print("ratio_edge_cases.log created successfully.")
-
-
-
-
