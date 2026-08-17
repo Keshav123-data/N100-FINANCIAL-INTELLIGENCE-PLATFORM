@@ -227,6 +227,120 @@ def test_database():
             str(e)
         )
 
+# ============================================================
+# FINANCIAL RATIOS VALIDATION
+# ============================================================
+
+def test_financial_ratios():
+
+    print()
+
+    print("=" * 75)
+    print("2. FINANCIAL RATIOS VALIDATION")
+    print("=" * 75)
+
+    financial_ratios_file = (
+        OUTPUT_DIR
+        / "financial_ratios.csv"
+    )
+
+    if not financial_ratios_file.exists():
+
+        record_test(
+            "financial_ratios.csv exists",
+            False,
+            f"File not found: {financial_ratios_file}"
+        )
+
+        return
+
+    record_test(
+        "financial_ratios.csv exists",
+        True
+    )
+
+    try:
+
+        df = pd.read_csv(
+            financial_ratios_file
+        )
+
+        print()
+        print(
+            f"Rows: {len(df)}"
+        )
+
+        print(
+            f"Columns: {len(df.columns)}"
+        )
+
+        required_columns = [
+            "company_id"
+        ]
+
+        for column in required_columns:
+
+            record_test(
+                f"financial_ratios contains {column}",
+                column in df.columns,
+                f"{column} column missing"
+            )
+
+        if "company_id" in df.columns:
+
+            companies = (
+                df["company_id"]
+                .nunique()
+            )
+
+            print(
+                f"Companies: {companies}"
+            )
+
+            record_test(
+                "Financial ratios contain companies",
+                companies > 0,
+                f"Found {companies} companies"
+            )
+
+        numeric_columns = [
+            column
+            for column in df.columns
+            if column not in [
+                "company_id",
+                "company_name",
+                "year"
+            ]
+        ]
+
+        if numeric_columns:
+
+            numeric_check = df[
+                numeric_columns
+            ].apply(
+                pd.to_numeric,
+                errors="coerce"
+            )
+
+            valid_numeric_values = (
+                numeric_check.notna()
+                .sum()
+                .sum()
+            )
+
+            record_test(
+                "Financial ratio numeric data exists",
+                valid_numeric_values > 0,
+                "No numeric financial ratio values found"
+            )
+
+    except Exception as e:
+
+        record_test(
+            "Financial ratios validation",
+            False,
+            str(e)
+        )
 
 # ============================================================
 # RUN EXISTING DQ TESTS

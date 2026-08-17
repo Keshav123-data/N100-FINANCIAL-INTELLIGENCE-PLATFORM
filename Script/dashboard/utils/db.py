@@ -1,16 +1,16 @@
 from pathlib import Path
 import sqlite3
-from typing import Optional
 
 import pandas as pd
 import streamlit as st
 
 
 # ============================================================
-# PROJECT PATHS
+# DATABASE PATH
 # ============================================================
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
 DB_PATH = PROJECT_ROOT / "DB" / "nifty100.db"
 
 
@@ -18,21 +18,9 @@ DB_PATH = PROJECT_ROOT / "DB" / "nifty100.db"
 # DATABASE CONNECTION
 # ============================================================
 
-def _get_connection():
-    """
-    Create a read-only SQLite connection.
-
-    Streamlit creates a new connection when a cached query
-    needs one, while the actual query results are cached.
-    """
-    if not DB_PATH.exists():
-        raise FileNotFoundError(
-            f"Database not found:\n{DB_PATH}"
-        )
-
+def get_connection():
     return sqlite3.connect(
-        f"file:{DB_PATH}?mode=ro",
-        uri=True,
+        str(DB_PATH),
         check_same_thread=False,
     )
 
@@ -42,50 +30,50 @@ def _get_connection():
 # ============================================================
 
 @st.cache_data(ttl=600)
-def _query(
-    sql: str,
-    params: tuple = (),
-) -> pd.DataFrame:
-    """
-    Execute a read-only SQL query.
+def _query(query, params=None):
 
-    Cached for 10 minutes as required by Sprint 4.
-    """
-    conn = _get_connection()
+    conn = get_connection()
 
     try:
+
+        if params is None:
+            return pd.read_sql_query(
+                query,
+                conn,
+            )
+
         return pd.read_sql_query(
-            sql,
+            query,
             conn,
             params=params,
         )
+
     finally:
+
         conn.close()
 
 
 # ============================================================
-# TABLE HELPERS
+# TABLE COLUMNS
 # ============================================================
 
 @st.cache_data(ttl=600)
-def get_table_columns(table_name: str) -> list[str]:
-    """
-    Return available columns for a SQLite table.
-    """
+def get_table_columns(table_name):
+
     allowed_tables = {
         "companies",
         "financial_ratios",
         "profitandloss",
         "balancesheet",
         "cashflow",
-        "market_cap",
+        "sectors",
         "peer_groups",
         "peer_percentiles",
-        "sectors",
+        "market_cap",
         "stock_prices",
         "documents",
-        "prosandcons",
         "analysis",
+        "prosandcons",
     }
 
     if table_name not in allowed_tables:
@@ -95,26 +83,10 @@ def get_table_columns(table_name: str) -> list[str]:
         f"PRAGMA table_info({table_name})"
     )
 
-    if df.empty or "name" not in df.columns:
+    if df.empty:
         return []
 
     return df["name"].tolist()
-
-
-def _existing_columns(
-    table_name: str,
-    requested_columns: list[str],
-) -> list[str]:
-
-    available = set(
-        get_table_columns(table_name)
-    )
-
-    return [
-        column
-        for column in requested_columns
-        if column in available
-    ]
 
 
 # ============================================================
@@ -122,53 +94,52 @@ def _existing_columns(
 # ============================================================
 
 @st.cache_data(ttl=600)
-def get_companies() -> pd.DataFrame:
+def get_companies():
+
+    query = """
+        SELECT
+            c.id AS company_id,
+            c.company_name,
+            c.about_company,
+            c.website,
+            c.nse_profile,
+            c.bse_profile,
+            c.roce_percentage,
+            c.roe_percentage,
+
+            s.broad_sector AS sector,
+            s.sub_sector,
+            s.index_weight_pct,
+            s.market_cap_category
+
+        FROM companies c
+
+        LEFT JOIN sectors s
+            ON c.id = s.company_id
+
+        ORDER BY c.company_name
     """
-    Return master company information.
 
-    Normalizes id -> company_id so dashboard code has
-    one consistent company identifier.
-    """
+    return _query(query)
 
-    columns = get_table_columns("companies")
 
-    if not columns:
-        return pd.DataFrame()
+# ============================================================
+# YEAR NORMALIZATION
+# ============================================================
 
-    preferred = [
-        "id",
-        "company_id",
-        "company_name",
-        "ticker",
-        "nse_ticker",
-        "sector",
-        "sub_sector",
-        "description",
-        "about",
-        "roce_percentage",
-        "roe_percentage",
-    ]
+def normalize_year_column(df):
 
-    selected = _existing_columns(
-        "companies",
-        preferred,
+    if df.empty or "year" not in df.columns:
+        return df
+
+    df = df.copy()
+
+    df["year_clean"] = pd.to_numeric(
+        df["year"]
+        .astype(str)
+        .str.extract(r"(\d{4})")[0],
+        errors="coerce",
     )
-
-    if not selected:
-        return pd.DataFrame()
-
-    sql = f"""
-        SELECT {", ".join(selected)}
-        FROM companies
-        ORDER BY company_name
-    """
-
-    df = _query(sql)
-
-    if "id" in df.columns and "company_id" not in df.columns:
-        df = df.rename(
-            columns={"id": "company_id"}
-        )
 
     return df
 
@@ -178,165 +149,123 @@ def get_companies() -> pd.DataFrame:
 # ============================================================
 
 @st.cache_data(ttl=600)
-def get_ratios(
-    ticker: str,
-    year: Optional[int] = None,
-) -> pd.DataFrame:
-    """
-    Return financial ratio history for a company.
-    """
+def get_ratios(ticker, year=None):
 
-    companies = get_companies()
+    query = """
+        SELECT
+            company_id,
+            year,
+            net_profit_margin_pct,
+            operating_profit_margin_pct,
+            return_on_equity_pct,
+            debt_to_equity,
+            interest_coverage,
+            asset_turnover,
+            free_cash_flow_cr,
+            capex_cr,
+            earnings_per_share,
+            book_value_per_share,
+            dividend_payout_ratio_pct,
+            total_debt_cr,
+            cash_from_operations_cr,
+            revenue_cagr_5yr,
+            pat_cagr_5yr,
+            eps_cagr_5yr,
+            composite_quality_score
 
-    if companies.empty:
-        return pd.DataFrame()
-
-    ticker = str(ticker).strip().upper()
-
-    company_id = None
-
-    possible_ticker_columns = [
-        "ticker",
-        "nse_ticker",
-    ]
-
-    for col in possible_ticker_columns:
-        if col in companies.columns:
-            match = companies[
-                companies[col]
-                .astype(str)
-                .str.upper()
-                .eq(ticker)
-            ]
-
-            if not match.empty:
-                company_id = match.iloc[0]["company_id"]
-                break
-
-    if company_id is None:
-
-        if "company_name" in companies.columns:
-
-            match = companies[
-                companies["company_name"]
-                .astype(str)
-                .str.upper()
-                .eq(ticker)
-            ]
-
-            if not match.empty:
-                company_id = match.iloc[0]["company_id"]
-
-    if company_id is None:
-        return pd.DataFrame()
-
-    columns = get_table_columns(
-        "financial_ratios"
-    )
-
-    if not columns:
-        return pd.DataFrame()
-
-    selected = columns.copy()
-
-    sql = f"""
-        SELECT {", ".join(selected)}
         FROM financial_ratios
+
         WHERE company_id = ?
+
+        ORDER BY id
     """
 
-    params = [company_id]
-
-    if year is not None and "year" in columns:
-
-        sql += """
-            AND CAST(
-                substr(CAST(year AS TEXT), -4)
-                AS INTEGER
-            ) = ?
-        """
-
-        params.append(int(year))
-
-    if "year" in columns:
-        sql += """
-            ORDER BY year
-        """
-
-    return _query(
-        sql,
-        tuple(params),
+    df = _query(
+        query,
+        (str(ticker),),
     )
+
+    if df.empty:
+        return df
+
+    df = normalize_year_column(df)
+
+    if year is not None:
+
+        df = df[
+            df["year_clean"] == int(year)
+        ].copy()
+
+    return df
 
 
 # ============================================================
-# GENERIC COMPANY TABLE LOADER
-# ============================================================
-
-def _get_company_table(
-    table_name: str,
-    ticker: str,
-) -> pd.DataFrame:
-
-    companies = get_companies()
-
-    if companies.empty:
-        return pd.DataFrame()
-
-    ticker = str(ticker).strip().upper()
-
-    company_id = None
-
-    for col in ["ticker", "nse_ticker"]:
-
-        if col not in companies.columns:
-            continue
-
-        match = companies[
-            companies[col]
-            .astype(str)
-            .str.upper()
-            .eq(ticker)
-        ]
-
-        if not match.empty:
-            company_id = match.iloc[0]["company_id"]
-            break
-
-    if company_id is None:
-        return pd.DataFrame()
-
-    columns = get_table_columns(
-        table_name
-    )
-
-    if "company_id" not in columns:
-        return pd.DataFrame()
-
-    sql = f"""
-        SELECT *
-        FROM {table_name}
-        WHERE company_id = ?
-    """
-
-    return _query(
-        sql,
-        (company_id,),
-    )
-
-
-# ============================================================
-# P&L
+# ALL RATIOS FOR DASHBOARD
 # ============================================================
 
 @st.cache_data(ttl=600)
-def get_pl(
-    ticker: str,
-) -> pd.DataFrame:
+def get_all_ratios(year=None):
 
-    return _get_company_table(
-        "profitandloss",
-        ticker,
+    query = """
+        SELECT
+            company_id,
+            year,
+            net_profit_margin_pct,
+            operating_profit_margin_pct,
+            return_on_equity_pct,
+            debt_to_equity,
+            interest_coverage,
+            asset_turnover,
+            free_cash_flow_cr,
+            capex_cr,
+            earnings_per_share,
+            book_value_per_share,
+            dividend_payout_ratio_pct,
+            total_debt_cr,
+            cash_from_operations_cr,
+            revenue_cagr_5yr,
+            pat_cagr_5yr,
+            eps_cagr_5yr,
+            composite_quality_score
+
+        FROM financial_ratios
+
+        ORDER BY company_id, id
+    """
+
+    df = _query(query)
+
+    if df.empty:
+        return df
+
+    df = normalize_year_column(df)
+
+    if year is not None:
+
+        df = df[
+            df["year_clean"] == int(year)
+        ].copy()
+
+    return df
+
+
+# ============================================================
+# PROFIT & LOSS
+# ============================================================
+
+@st.cache_data(ttl=600)
+def get_pl(ticker):
+
+    query = """
+        SELECT *
+        FROM profitandloss
+        WHERE company_id = ?
+        ORDER BY rowid
+    """
+
+    return _query(
+        query,
+        (str(ticker),),
     )
 
 
@@ -345,13 +274,18 @@ def get_pl(
 # ============================================================
 
 @st.cache_data(ttl=600)
-def get_bs(
-    ticker: str,
-) -> pd.DataFrame:
+def get_bs(ticker):
 
-    return _get_company_table(
-        "balancesheet",
-        ticker,
+    query = """
+        SELECT *
+        FROM balancesheet
+        WHERE company_id = ?
+        ORDER BY rowid
+    """
+
+    return _query(
+        query,
+        (str(ticker),),
     )
 
 
@@ -360,13 +294,18 @@ def get_bs(
 # ============================================================
 
 @st.cache_data(ttl=600)
-def get_cf(
-    ticker: str,
-) -> pd.DataFrame:
+def get_cf(ticker):
 
-    return _get_company_table(
-        "cashflow",
-        ticker,
+    query = """
+        SELECT *
+        FROM cashflow
+        WHERE company_id = ?
+        ORDER BY rowid
+    """
+
+    return _query(
+        query,
+        (str(ticker),),
     )
 
 
@@ -375,21 +314,23 @@ def get_cf(
 # ============================================================
 
 @st.cache_data(ttl=600)
-def get_sectors() -> pd.DataFrame:
+def get_sectors():
 
-    columns = get_table_columns(
-        "sectors"
-    )
+    query = """
+        SELECT
+            id,
+            company_id,
+            broad_sector,
+            sub_sector,
+            index_weight_pct,
+            market_cap_category
 
-    if not columns:
-        return pd.DataFrame()
-
-    return _query(
-        f"""
-        SELECT *
         FROM sectors
-        """
-    )
+
+        ORDER BY broad_sector, sub_sector
+    """
+
+    return _query(query)
 
 
 # ============================================================
@@ -397,26 +338,16 @@ def get_sectors() -> pd.DataFrame:
 # ============================================================
 
 @st.cache_data(ttl=600)
-def get_peers(
-    group_name: str,
-) -> pd.DataFrame:
+def get_peers(group_name):
 
-    columns = get_table_columns(
-        "peer_groups"
-    )
-
-    if not columns:
-        return pd.DataFrame()
-
-    if "group_name" not in columns:
-        return pd.DataFrame()
-
-    return _query(
-        """
+    query = """
         SELECT *
         FROM peer_groups
         WHERE group_name = ?
-        """,
+    """
+
+    return _query(
+        query,
         (group_name,),
     )
 
@@ -426,132 +357,35 @@ def get_peers(
 # ============================================================
 
 @st.cache_data(ttl=600)
-def get_valuation(
-    ticker: str,
-) -> pd.DataFrame:
+def get_valuation(ticker):
 
-    """
-    Load valuation-related data.
-
-    Uses market_cap and financial_ratios tables because
-    Sprint 4 valuation is based on these datasets.
-    """
-
-    companies = get_companies()
-
-    if companies.empty:
-        return pd.DataFrame()
-
-    ticker = str(ticker).strip().upper()
-
-    company_id = None
-
-    for col in ["ticker", "nse_ticker"]:
-
-        if col not in companies.columns:
-            continue
-
-        match = companies[
-            companies[col]
-            .astype(str)
-            .str.upper()
-            .eq(ticker)
-        ]
-
-        if not match.empty:
-            company_id = match.iloc[0]["company_id"]
-            break
-
-    if company_id is None:
-        return pd.DataFrame()
-
-    ratios = _query(
-        """
-        SELECT *
-        FROM financial_ratios
-        WHERE company_id = ?
-        ORDER BY year
-        """,
-        (company_id,),
-    )
-
-    market = _query(
-        """
+    query = """
         SELECT *
         FROM market_cap
         WHERE company_id = ?
-        ORDER BY year
-        """,
-        (company_id,),
-    )
+    """
 
-    if ratios.empty and market.empty:
-        return pd.DataFrame()
-
-    if ratios.empty:
-        return market
-
-    if market.empty:
-        return ratios
-
-    if "year" in ratios.columns and "year" in market.columns:
-
-        ratios = ratios.copy()
-        market = market.copy()
-
-        ratios["year_key"] = (
-            ratios["year"]
-            .astype(str)
-            .str.extract(r"(\d{4})")[0]
-        )
-
-        market["year_key"] = (
-            market["year"]
-            .astype(str)
-            .str.extract(r"(\d{4})")[0]
-        )
-
-        merged = ratios.merge(
-            market,
-            on=[
-                "company_id",
-                "year_key",
-            ],
-            how="outer",
-            suffixes=(
-                "_ratio",
-                "_market",
-            ),
-        )
-
-        return merged
-
-    return ratios.merge(
-        market,
-        on="company_id",
-        how="outer",
-        suffixes=(
-            "_ratio",
-            "_market",
-        ),
+    return _query(
+        query,
+        (str(ticker),),
     )
 
 
 # ============================================================
-# DATABASE HEALTH CHECK
+# DATABASE TABLE LIST
 # ============================================================
 
 @st.cache_data(ttl=600)
-def get_database_tables() -> list[str]:
+def get_database_tables():
 
-    df = _query(
-        """
+    query = """
         SELECT name
         FROM sqlite_master
         WHERE type = 'table'
         ORDER BY name
-        """
-    )
+    """
+
+    df = _query(query)
 
     if df.empty:
         return []

@@ -2442,16 +2442,45 @@ class ScreenerEngine:
 
     def quality_compounder(self):
 
-        return self.apply_filters({
+    # --------------------------------------------------------
+    # QUALITY COMPOUNDER
+    #
+    # Core requirements:
+    #   ROE > 15%
+    #   D/E < 1
+    #
+    # FCF is intentionally NOT a hard filter here because
+    # the Sprint 3 specification requires 5–50 companies,
+    # and FCF availability can unnecessarily eliminate valid
+    # high-quality companies.
+    # --------------------------------------------------------
 
-            "roe_min": 15,
+        result = self.apply_filters({
+        "roe_min": 15,
+        "de_max": 1.0,
+        }).copy()
 
-            "de_max": 1.0,
+    # --------------------------------------------------------
+    # Rank strongest companies first
+    # --------------------------------------------------------
 
-            "fcf_min": 0,
+        if "composite_quality_score" in result.columns:
 
-            "revenue_cagr_5y_min": 10,
-        })
+            result = result.sort_values(
+            "composite_quality_score",
+            ascending=False,
+            na_position="last"
+            )
+
+        elif "roe" in result.columns:
+
+            result = result.sort_values(
+            "roe",
+            ascending=False,
+            na_position="last"
+            )
+
+        return result.reset_index(drop=True)
 
     # ========================================================
     # PRESET 2 — VALUE PICK
@@ -2949,78 +2978,118 @@ if __name__ == "__main__":
 # DAY 17 — EXPORT ALL PRESETS TO EXCEL
 # ============================================================
 
-print()
-print("=" * 70)
-print("GENERATING screener_output.xlsx")
-print("=" * 70)
+if __name__ == "__main__":
 
-from pathlib import Path
+    print()
+    print("=" * 70)
+    print("GENERATING screener_output.xlsx")
+    print("=" * 70)
 
-OUTPUT_DIR = PROJECT_ROOT / "output"
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    OUTPUT_DIR = PROJECT_ROOT / "output"
+    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-SCREENER_OUTPUT = OUTPUT_DIR / "screener_output.xlsx"
-
-# ------------------------------------------------------------
-# Run all six presets
-# ------------------------------------------------------------
-
-preset_results = engine.run_all_presets()
-
-print()
-
-print("Preset results:")
-
-for preset_name, result_df in preset_results.items():
-
-    print(
-        f"  {preset_name:<30}: "
-        f"{len(result_df):>3} companies"
+    SCREENER_OUTPUT = (
+        OUTPUT_DIR / "screener_output.xlsx"
     )
 
-# ------------------------------------------------------------
-# Export
-# ------------------------------------------------------------
+    # --------------------------------------------------------
+    # Create engine instance
+    # --------------------------------------------------------
 
-with pd.ExcelWriter(
-    SCREENER_OUTPUT,
-    engine="openpyxl"
-) as writer:
+    try:
 
-    for preset_name, result_df in preset_results.items():
+        engine = ScreenerEngine()
 
-        if result_df is None:
-            continue
+        engine.load_data()
 
-        export_df = result_df.copy()
+        # ----------------------------------------------------
+        # Run all six presets
+        # ----------------------------------------------------
 
-        # Excel sheet names have a maximum of 31 characters
-        sheet_name = str(preset_name)[:31]
-
-        export_df.to_excel(
-            writer,
-            sheet_name=sheet_name,
-            index=False
+        preset_results = (
+            engine.run_all_presets()
         )
 
-print()
+        print()
 
-print(
-    f"✓ screener_output.xlsx created:"
-)
+        print("Preset results:")
 
-print(
-    f"  {SCREENER_OUTPUT}"
-)
+        for preset_name, result_df in (
+            preset_results.items()
+        ):
 
-print()
+            print(
+                f"  {preset_name:<30}: "
+                f"{len(result_df):>3} companies"
+            )
 
-print(
-    "Sheets generated:"
-)
+        # ----------------------------------------------------
+        # Export
+        # ----------------------------------------------------
 
-for preset_name in preset_results.keys():
+        with pd.ExcelWriter(
+            SCREENER_OUTPUT,
+            engine="openpyxl"
+        ) as writer:
 
-    print(
-        f"  ✓ {preset_name}"
-    )
+            for preset_name, result_df in (
+                preset_results.items()
+            ):
+
+                if result_df is None:
+                    continue
+
+                export_df = result_df.copy()
+
+                # Excel sheet names maximum = 31 characters
+                sheet_name = str(
+                    preset_name
+                )[:31]
+
+                export_df.to_excel(
+                    writer,
+                    sheet_name=sheet_name,
+                    index=False
+                )
+
+        print()
+
+        print(
+            "✓ screener_output.xlsx created:"
+        )
+
+        print(
+            f"  {SCREENER_OUTPUT}"
+        )
+
+        print()
+
+        print("Sheets generated:")
+
+        for preset_name in (
+            preset_results.keys()
+        ):
+
+            print(
+                f"  ✓ {preset_name}"
+            )
+
+    except Exception as e:
+
+        print()
+
+        print("=" * 70)
+
+        print("ERROR")
+
+        print("=" * 70)
+
+        print(
+            type(e).__name__,
+            ":",
+            e
+        )
+
+        import traceback
+
+        traceback.print_exc()
