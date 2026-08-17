@@ -1,8 +1,8 @@
 import sys
 from pathlib import Path
 
-import numpy as np
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 
@@ -19,7 +19,6 @@ if str(PROJECT_ROOT) not in sys.path:
 from Script.dashboard.utils.db import (
     get_companies,
     get_all_ratios,
-    get_sectors,
     get_valuation,
 )
 
@@ -31,334 +30,139 @@ from Script.dashboard.utils.db import (
 st.title("🔎 Stock Screener")
 
 st.caption(
-    "Screen NIFTY 100 companies using profitability, "
-    "growth, valuation, leverage and cash-flow metrics."
+    "Filter NIFTY 100 companies using financial, "
+    "valuation and quality metrics."
 )
 
 
 # ============================================================
-# HELPERS
+# LOAD COMPANY DATA
 # ============================================================
 
-def numeric(series):
-    return pd.to_numeric(
-        series,
-        errors="coerce",
+companies = get_companies()
+
+if companies.empty:
+
+    st.error(
+        "Company database could not be loaded."
     )
 
-
-def clean_dataframe(df):
-
-    if df.empty:
-        return df
-
-    df = df.copy()
-
-    for column in df.columns:
-
-        if column not in [
-            "company_id",
-            "company_name",
-            "sector",
-            "sub_sector",
-        ]:
-
-            try:
-                df[column] = pd.to_numeric(
-                    df[column],
-                    errors="ignore",
-                )
-            except Exception:
-                pass
-
-    return df
+    st.stop()
 
 
-def latest_by_company(df):
+# ============================================================
+# LOAD FINANCIAL RATIOS
+# ============================================================
 
-    if df.empty:
-        return df
+ratios = get_all_ratios()
 
-    df = df.copy()
+if ratios.empty:
 
-    if "year_clean" in df.columns:
-
-        df = df.sort_values(
-            [
-                "company_id",
-                "year_clean",
-            ]
-        )
-
-    elif "year" in df.columns:
-
-        df["year_numeric"] = pd.to_numeric(
-            df["year"],
-            errors="coerce",
-        )
-
-        df = df.sort_values(
-            [
-                "company_id",
-                "year_numeric",
-            ]
-        )
-
-    return (
-        df
-        .drop_duplicates(
-            subset=["company_id"],
-            keep="last",
-        )
-        .reset_index(drop=True)
+    st.error(
+        "Financial ratio data could not be loaded."
     )
 
+    st.stop()
+
 
 # ============================================================
-# LOAD DATA
+# KEEP LATEST YEAR FOR EACH COMPANY
 # ============================================================
 
-@st.cache_data(ttl=600)
-def load_screener_data():
+ratios = ratios.copy()
 
-    companies = get_companies()
+ratios["year_num"] = pd.to_numeric(
+    ratios["year"],
+    errors="coerce"
+)
 
-    ratios = get_all_ratios()
+ratios = ratios.sort_values(
+    ["company_id", "year_num"]
+)
 
-    sectors = get_sectors()
+latest_ratios = (
+    ratios
+    .groupby("company_id", as_index=False)
+    .tail(1)
+    .copy()
+)
 
-    if companies.empty:
-        return pd.DataFrame()
 
-    # --------------------------------------------------------
-    # COMPANY DATA
-    # --------------------------------------------------------
+# ============================================================
+# LOAD VALUATION DATA
+# ============================================================
 
-    company_columns = [
+valuation_rows = []
+
+for company_id in companies["company_id"]:
+
+    try:
+
+        valuation = get_valuation(
+            company_id
+        )
+
+        if valuation is not None and not valuation.empty:
+
+            valuation = valuation.copy()
+
+            valuation["company_id"] = company_id
+
+            valuation_rows.append(
+                valuation
+            )
+
+    except Exception:
+        continue
+
+
+if valuation_rows:
+
+    valuation_df = pd.concat(
+        valuation_rows,
+        ignore_index=True
+    )
+
+    if "year" in valuation_df.columns:
+
+        valuation_df["year_num"] = pd.to_numeric(
+            valuation_df["year"],
+            errors="coerce"
+        )
+
+        valuation_df = (
+            valuation_df
+            .sort_values(
+                ["company_id", "year_num"]
+            )
+            .groupby(
+                "company_id",
+                as_index=False
+            )
+            .tail(1)
+        )
+
+else:
+
+    valuation_df = pd.DataFrame()
+
+
+# ============================================================
+# MERGE DATA
+# ============================================================
+
+screener = companies.merge(
+    latest_ratios,
+    on="company_id",
+    how="left",
+    suffixes=("", "_ratio")
+)
+
+
+if not valuation_df.empty:
+
+    valuation_columns = [
         "company_id",
-        "company_name",
-        "sector",
-        "sub_sector",
-        "market_cap_category",
-    ]
-
-    company_columns = [
-        c
-        for c in company_columns
-        if c in companies.columns
-    ]
-
-    company_df = companies[
-        company_columns
-    ].drop_duplicates(
-        subset=["company_id"]
-    )
-
-    # --------------------------------------------------------
-    # RATIOS
-    # --------------------------------------------------------
-
-    if not ratios.empty:
-
-        ratios = ratios.copy()
-
-        if "year_clean" not in ratios.columns:
-
-            ratios["year_clean"] = pd.to_numeric(
-                ratios["year"]
-                .astype(str)
-                .str.extract(
-                    r"(\d{4})"
-                )[0],
-                errors="coerce",
-            )
-
-        ratios = latest_by_company(
-            ratios
-        )
-
-    # --------------------------------------------------------
-    # SECTORS
-    # --------------------------------------------------------
-
-    if not sectors.empty:
-
-        sector_columns = [
-            "company_id",
-            "broad_sector",
-            "sub_sector",
-        ]
-
-        sector_columns = [
-            c
-            for c in sector_columns
-            if c in sectors.columns
-        ]
-
-        sector_df = (
-            sectors[sector_columns]
-            .drop_duplicates(
-                subset=["company_id"]
-            )
-        )
-
-    else:
-
-        sector_df = pd.DataFrame()
-
-    # --------------------------------------------------------
-    # MERGE
-    # --------------------------------------------------------
-
-    df = company_df.copy()
-
-    if not ratios.empty:
-
-        ratio_columns = [
-            "company_id",
-            "year",
-            "year_clean",
-            "net_profit_margin_pct",
-            "operating_profit_margin_pct",
-            "return_on_equity_pct",
-            "debt_to_equity",
-            "interest_coverage",
-            "asset_turnover",
-            "free_cash_flow_cr",
-            "capex_cr",
-            "earnings_per_share",
-            "book_value_per_share",
-            "dividend_payout_ratio_pct",
-            "total_debt_cr",
-            "cash_from_operations_cr",
-            "revenue_cagr_5yr",
-            "pat_cagr_5yr",
-            "eps_cagr_5yr",
-            "composite_quality_score",
-        ]
-
-        ratio_columns = [
-            c
-            for c in ratio_columns
-            if c in ratios.columns
-        ]
-
-        df = df.merge(
-            ratios[ratio_columns],
-            on="company_id",
-            how="left",
-        )
-
-    if not sector_df.empty:
-
-        df = df.merge(
-            sector_df,
-            on="company_id",
-            how="left",
-            suffixes=("", "_sector"),
-        )
-
-    # --------------------------------------------------------
-    # VALUATION DATA
-    # --------------------------------------------------------
-
-    valuation_frames = []
-
-    for company_id in df["company_id"].dropna().unique():
-
-        try:
-
-            valuation = get_valuation(
-                company_id
-            )
-
-            if not valuation.empty:
-
-                valuation_frames.append(
-                    valuation
-                )
-
-        except Exception:
-            continue
-
-    if valuation_frames:
-
-        valuation_df = pd.concat(
-            valuation_frames,
-            ignore_index=True,
-        )
-
-        if "year" in valuation_df.columns:
-
-            valuation_df["year_numeric"] = (
-                pd.to_numeric(
-                    valuation_df["year"],
-                    errors="coerce",
-                )
-            )
-
-            valuation_df = (
-                valuation_df
-                .sort_values(
-                    [
-                        "company_id",
-                        "year_numeric",
-                    ]
-                )
-                .drop_duplicates(
-                    subset=["company_id"],
-                    keep="last",
-                )
-            )
-
-        valuation_columns = [
-            "company_id",
-            "year",
-            "market_cap_crore",
-            "enterprise_value_crore",
-            "pe_ratio",
-            "pb_ratio",
-            "ev_ebitda",
-            "dividend_yield_pct",
-        ]
-
-        valuation_columns = [
-            c
-            for c in valuation_columns
-            if c in valuation_df.columns
-        ]
-
-        df = df.merge(
-            valuation_df[
-                valuation_columns
-            ],
-            on="company_id",
-            how="left",
-            suffixes=("", "_valuation"),
-        )
-
-    # --------------------------------------------------------
-    # NORMALIZE NUMERIC COLUMNS
-    # --------------------------------------------------------
-
-    numeric_columns = [
-        "net_profit_margin_pct",
-        "operating_profit_margin_pct",
-        "return_on_equity_pct",
-        "debt_to_equity",
-        "interest_coverage",
-        "asset_turnover",
-        "free_cash_flow_cr",
-        "capex_cr",
-        "earnings_per_share",
-        "book_value_per_share",
-        "dividend_payout_ratio_pct",
-        "total_debt_cr",
-        "cash_from_operations_cr",
-        "revenue_cagr_5yr",
-        "pat_cagr_5yr",
-        "eps_cagr_5yr",
-        "composite_quality_score",
         "market_cap_crore",
         "enterprise_value_crore",
         "pe_ratio",
@@ -367,536 +171,455 @@ def load_screener_data():
         "dividend_yield_pct",
     ]
 
-    for column in numeric_columns:
+    valuation_columns = [
+        c
+        for c in valuation_columns
+        if c in valuation_df.columns
+    ]
 
-        if column in df.columns:
-
-            df[column] = numeric(
-                df[column]
-            )
-
-    # --------------------------------------------------------
-    # FRIENDLY COLUMN NAMES
-    # --------------------------------------------------------
-
-    rename_map = {
-
-        "return_on_equity_pct":
-            "roe",
-
-        "net_profit_margin_pct":
-            "npm",
-
-        "operating_profit_margin_pct":
-            "opm",
-
-        "free_cash_flow_cr":
-            "fcf",
-
-        "revenue_cagr_5yr":
-            "revenue_cagr_5y",
-
-        "pat_cagr_5yr":
-            "pat_cagr_5y",
-
-        "eps_cagr_5yr":
-            "eps_cagr_5y",
-
-        "dividend_payout_ratio_pct":
-            "dividend_payout_pct",
-
-        "market_cap_crore":
-            "market_cap",
-
-        "pe_ratio":
-            "pe",
-
-        "pb_ratio":
-            "pb",
-
-        "dividend_yield_pct":
-            "dividend_yield",
-    }
-
-    df = df.rename(
-        columns=rename_map
+    screener = screener.merge(
+        valuation_df[
+            valuation_columns
+        ],
+        on="company_id",
+        how="left"
     )
-
-    return clean_dataframe(df)
 
 
 # ============================================================
-# LOAD
+# NUMERIC CONVERSION
 # ============================================================
 
-with st.spinner(
-    "Loading NIFTY 100 financial data..."
-):
+numeric_columns = [
 
-    data = load_screener_data()
+    "return_on_equity_pct",
+    "debt_to_equity",
+    "net_profit_margin_pct",
+    "operating_profit_margin_pct",
+
+    "free_cash_flow_cr",
+    "revenue_cagr_5yr",
+    "pat_cagr_5yr",
+    "eps_cagr_5yr",
+
+    "interest_coverage",
+    "asset_turnover",
+
+    "composite_quality_score",
+
+    "market_cap_crore",
+    "enterprise_value_crore",
+    "pe_ratio",
+    "pb_ratio",
+    "ev_ebitda",
+    "dividend_yield_pct",
+
+]
 
 
-if data.empty:
+for column in numeric_columns:
 
-    st.error(
-        "Unable to load screener data."
-    )
+    if column in screener.columns:
 
-    st.stop()
+        screener[column] = pd.to_numeric(
+            screener[column],
+            errors="coerce"
+        )
 
 
 # ============================================================
-# HEADER KPIs
+# SIDEBAR
 # ============================================================
 
-total_companies = len(data)
-
-quality_available = (
-    data["composite_quality_score"]
-    .notna()
-    .sum()
-    if "composite_quality_score" in data.columns
-    else 0
-)
-
-growth_available = (
-    data["revenue_cagr_5y"]
-    .notna()
-    .sum()
-    if "revenue_cagr_5y" in data.columns
-    else 0
-)
-
-valuation_available = (
-    data["pe"]
-    .notna()
-    .sum()
-    if "pe" in data.columns
-    else 0
-)
-
-
-k1, k2, k3, k4 = st.columns(4)
-
-with k1:
-    st.metric(
-        "Companies",
-        total_companies,
-    )
-
-with k2:
-    st.metric(
-        "Quality Scores",
-        quality_available,
-    )
-
-with k3:
-    st.metric(
-        "Growth Data",
-        growth_available,
-    )
-
-with k4:
-    st.metric(
-        "Valuation Data",
-        valuation_available,
-    )
+st.sidebar.header("Screener Filters")
 
 
 # ============================================================
 # PRESETS
 # ============================================================
 
-st.divider()
-
-st.subheader(
-    "⭐ Preset Screeners"
+preset = st.sidebar.selectbox(
+    "Preset",
+    [
+        "Custom",
+        "Quality Compounder",
+        "Value Pick",
+        "Growth Accelerator",
+        "Dividend Champion",
+        "Debt-Free Blue Chip",
+    ]
 )
-
-preset_definitions = {
-
-    "Custom": {},
-
-    "Quality Compounder": {
-        "roe_min": 15,
-        "de_max": 1.0,
-        "fcf_min": 0,
-    },
-
-    "Value Pick": {
-        "pe_max": 20,
-        "pb_max": 3.0,
-        "de_max": 2.0,
-        "dividend_yield_min": 1,
-    },
-
-    "Growth Accelerator": {
-        "pat_cagr_5y_min": 20,
-        "revenue_cagr_5y_min": 15,
-        "de_max": 2.0,
-    },
-
-    "Dividend Champion": {
-        "dividend_yield_min": 2,
-        "dividend_payout_max": 80,
-        "fcf_min": 0,
-    },
-
-    "Debt-Free Blue Chip": {
-        "de_max": 0,
-        "roe_min": 12,
-    },
-
-    "Turnaround Watch": {
-        "revenue_cagr_3y_min": 10,
-        "fcf_min": 0,
-    },
-}
-
-
-preset = st.selectbox(
-    "Choose a preset",
-    list(preset_definitions.keys()),
-)
-
-
-preset_filters = preset_definitions[
-    preset
-]
-
-
-if preset != "Custom":
-
-    st.info(
-        f"Preset loaded: **{preset}**"
-    )
 
 
 # ============================================================
-# SIDEBAR FILTERS
+# DEFAULT FILTER VALUES
 # ============================================================
 
-st.sidebar.header(
-    "🔎 Screener Filters"
-)
+roe_min = 0.0
+de_max = 999.0
+fcf_min = -999999.0
+revenue_cagr_min = -999.0
+pat_cagr_min = -999.0
+opm_min = -999.0
+pe_max = 999.0
+pb_max = 999.0
+dividend_yield_min = 0.0
+icr_min = -999.0
 
 
-if st.sidebar.button(
-    "Reset Filters",
-    width="stretch",
-):
+# ============================================================
+# PRESET LOGIC
+# ============================================================
 
-    st.rerun()
+if preset == "Quality Compounder":
+
+    roe_min = 15
+    de_max = 1.0
+    fcf_min = 0
 
 
-# ------------------------------------------------------------
-# Sector
-# ------------------------------------------------------------
+elif preset == "Value Pick":
 
-sector_values = ["All"]
+    pe_max = 20
+    pb_max = 3
+    de_max = 2
+    dividend_yield_min = 1
 
-if "sector" in data.columns:
 
-    sector_values += sorted(
-        data["sector"]
-        .dropna()
-        .astype(str)
-        .unique()
-        .tolist()
+elif preset == "Growth Accelerator":
+
+    pat_cagr_min = 20
+    revenue_cagr_min = 15
+    de_max = 2
+
+
+elif preset == "Dividend Champion":
+
+    dividend_yield_min = 2
+    fcf_min = 0
+
+
+elif preset == "Debt-Free Blue Chip":
+
+    de_max = 0
+    roe_min = 12
+
+
+# ============================================================
+# CUSTOM FILTERS
+# ============================================================
+
+if preset == "Custom":
+
+    roe_min = st.sidebar.number_input(
+        "Minimum ROE (%)",
+        min_value=-100.0,
+        max_value=200.0,
+        value=0.0,
+        step=1.0,
     )
 
+    de_max = st.sidebar.number_input(
+        "Maximum D/E",
+        min_value=0.0,
+        max_value=20.0,
+        value=999.0,
+        step=0.1,
+    )
 
-selected_sector = st.sidebar.selectbox(
-    "Sector",
-    sector_values,
-)
+    fcf_min = st.sidebar.number_input(
+        "Minimum FCF (₹ Cr)",
+        value=-999999.0,
+        step=100.0,
+    )
 
+    revenue_cagr_min = st.sidebar.number_input(
+        "Minimum Revenue CAGR 5Y (%)",
+        min_value=-100.0,
+        max_value=200.0,
+        value=-999.0,
+        step=1.0,
+    )
 
-# ------------------------------------------------------------
-# ROE
-# ------------------------------------------------------------
+    pat_cagr_min = st.sidebar.number_input(
+        "Minimum PAT CAGR 5Y (%)",
+        min_value=-100.0,
+        max_value=200.0,
+        value=-999.0,
+        step=1.0,
+    )
 
-roe_min = st.sidebar.number_input(
-    "Minimum ROE (%)",
-    min_value=-100.0,
-    max_value=200.0,
-    value=float(
-        preset_filters.get(
-            "roe_min",
-            0,
-        )
-    ),
-    step=1.0,
-)
+    opm_min = st.sidebar.number_input(
+        "Minimum OPM (%)",
+        min_value=-100.0,
+        max_value=200.0,
+        value=-999.0,
+        step=1.0,
+    )
 
+    pe_max = st.sidebar.number_input(
+        "Maximum P/E",
+        min_value=0.0,
+        max_value=500.0,
+        value=999.0,
+        step=1.0,
+    )
 
-# ------------------------------------------------------------
-# ROCE
-# ------------------------------------------------------------
+    pb_max = st.sidebar.number_input(
+        "Maximum P/B",
+        min_value=0.0,
+        max_value=100.0,
+        value=999.0,
+        step=0.5,
+    )
 
-roce_min = st.sidebar.number_input(
-    "Minimum ROCE (%)",
-    min_value=-100.0,
-    max_value=300.0,
-    value=0.0,
-    step=1.0,
-)
+    dividend_yield_min = st.sidebar.number_input(
+        "Minimum Dividend Yield (%)",
+        min_value=0.0,
+        max_value=50.0,
+        value=0.0,
+        step=0.5,
+    )
 
-
-# ------------------------------------------------------------
-# D/E
-# ------------------------------------------------------------
-
-de_max = st.sidebar.number_input(
-    "Maximum D/E",
-    min_value=0.0,
-    max_value=20.0,
-    value=float(
-        preset_filters.get(
-            "de_max",
-            20.0,
-        )
-    ),
-    step=0.1,
-)
-
-
-# ------------------------------------------------------------
-# P/E
-# ------------------------------------------------------------
-
-pe_max = st.sidebar.number_input(
-    "Maximum P/E",
-    min_value=0.0,
-    max_value=500.0,
-    value=float(
-        preset_filters.get(
-            "pe_max",
-            500.0,
-        )
-    ),
-    step=1.0,
-)
-
-
-# ------------------------------------------------------------
-# P/B
-# ------------------------------------------------------------
-
-pb_max = st.sidebar.number_input(
-    "Maximum P/B",
-    min_value=0.0,
-    max_value=100.0,
-    value=float(
-        preset_filters.get(
-            "pb_max",
-            100.0,
-        )
-    ),
-    step=0.5,
-)
-
-
-# ------------------------------------------------------------
-# Revenue CAGR
-# ------------------------------------------------------------
-
-revenue_cagr_min = st.sidebar.number_input(
-    "Minimum Revenue CAGR 5Y (%)",
-    min_value=-100.0,
-    max_value=200.0,
-    value=float(
-        preset_filters.get(
-            "revenue_cagr_5y_min",
-            0,
-        )
-    ),
-    step=1.0,
-)
-
-
-# ------------------------------------------------------------
-# PAT CAGR
-# ------------------------------------------------------------
-
-pat_cagr_min = st.sidebar.number_input(
-    "Minimum PAT CAGR 5Y (%)",
-    min_value=-100.0,
-    max_value=300.0,
-    value=float(
-        preset_filters.get(
-            "pat_cagr_5y_min",
-            0,
-        )
-    ),
-    step=1.0,
-)
-
-
-# ------------------------------------------------------------
-# EPS CAGR
-# ------------------------------------------------------------
-
-eps_cagr_min = st.sidebar.number_input(
-    "Minimum EPS CAGR 5Y (%)",
-    min_value=-100.0,
-    max_value=300.0,
-    value=0.0,
-    step=1.0,
-)
-
-
-# ------------------------------------------------------------
-# Dividend Yield
-# ------------------------------------------------------------
-
-dividend_yield_min = st.sidebar.number_input(
-    "Minimum Dividend Yield (%)",
-    min_value=0.0,
-    max_value=50.0,
-    value=float(
-        preset_filters.get(
-            "dividend_yield_min",
-            0,
-        )
-    ),
-    step=0.5,
-)
-
-
-# ------------------------------------------------------------
-# FCF
-# ------------------------------------------------------------
-
-fcf_min = st.sidebar.number_input(
-    "Minimum FCF (₹ Cr)",
-    min_value=-100000.0,
-    max_value=100000.0,
-    value=float(
-        preset_filters.get(
-            "fcf_min",
-            -100000,
-        )
-    ),
-    step=100.0,
-)
+    icr_min = st.sidebar.number_input(
+        "Minimum Interest Coverage",
+        min_value=-100.0,
+        max_value=100.0,
+        value=-999.0,
+        step=0.5,
+    )
 
 
 # ============================================================
 # APPLY FILTERS
 # ============================================================
 
-filtered = data.copy()
+filtered = screener.copy()
 
 
-def apply_minimum(
-    frame,
-    column,
-    minimum,
-):
-
-    if column not in frame.columns:
-        return frame
-
-    values = numeric(
-        frame[column]
-    )
-
-    return frame[
-        values.notna()
-        & (values >= minimum)
-    ].copy()
-
-
-def apply_maximum(
-    frame,
-    column,
-    maximum,
-):
-
-    if column not in frame.columns:
-        return frame
-
-    values = numeric(
-        frame[column]
-    )
-
-    return frame[
-        values.notna()
-        & (values <= maximum)
-    ].copy()
-
-
-# Sector
-
-if selected_sector != "All":
+if "return_on_equity_pct" in filtered.columns:
 
     filtered = filtered[
-        filtered["sector"]
-        .astype(str)
-        == selected_sector
+        filtered["return_on_equity_pct"]
+        .fillna(-999999)
+        >= roe_min
     ]
 
 
-filtered = apply_minimum(
-    filtered,
-    "roe",
-    roe_min,
+if "debt_to_equity" in filtered.columns:
+
+    filtered = filtered[
+        filtered["debt_to_equity"]
+        .fillna(999999)
+        <= de_max
+    ]
+
+
+if "free_cash_flow_cr" in filtered.columns:
+
+    filtered = filtered[
+        filtered["free_cash_flow_cr"]
+        .fillna(-999999)
+        >= fcf_min
+    ]
+
+
+if "revenue_cagr_5yr" in filtered.columns:
+
+    filtered = filtered[
+        filtered["revenue_cagr_5yr"]
+        .fillna(-999999)
+        >= revenue_cagr_min
+    ]
+
+
+if "pat_cagr_5yr" in filtered.columns:
+
+    filtered = filtered[
+        filtered["pat_cagr_5yr"]
+        .fillna(-999999)
+        >= pat_cagr_min
+    ]
+
+
+if "operating_profit_margin_pct" in filtered.columns:
+
+    filtered = filtered[
+        filtered["operating_profit_margin_pct"]
+        .fillna(-999999)
+        >= opm_min
+    ]
+
+
+if "pe_ratio" in filtered.columns:
+
+    filtered = filtered[
+        (
+            filtered["pe_ratio"].isna()
+            |
+            (
+                filtered["pe_ratio"]
+                <= pe_max
+            )
+        )
+    ]
+
+
+if "pb_ratio" in filtered.columns:
+
+    filtered = filtered[
+        (
+            filtered["pb_ratio"].isna()
+            |
+            (
+                filtered["pb_ratio"]
+                <= pb_max
+            )
+        )
+    ]
+
+
+if "dividend_yield_pct" in filtered.columns:
+
+    filtered = filtered[
+        filtered["dividend_yield_pct"]
+        .fillna(0)
+        >= dividend_yield_min
+    ]
+
+
+if "interest_coverage" in filtered.columns:
+
+    filtered = filtered[
+        filtered["interest_coverage"]
+        .fillna(-999999)
+        >= icr_min
+    ]
+
+
+# ============================================================
+# SEARCH
+# ============================================================
+
+search = st.sidebar.text_input(
+    "Search company",
+    placeholder="Example: TCS"
 )
 
-filtered = apply_minimum(
-    filtered,
-    "roce",
-    roce_min,
-)
 
-filtered = apply_maximum(
-    filtered,
-    "debt_to_equity",
-    de_max,
-)
+if search:
 
-filtered = apply_maximum(
-    filtered,
-    "pe",
-    pe_max,
-)
+    search = search.strip().lower()
 
-filtered = apply_maximum(
-    filtered,
-    "pb",
-    pb_max,
-)
+    filtered = filtered[
+        filtered["company_name"]
+        .astype(str)
+        .str.lower()
+        .str.contains(
+            search,
+            na=False
+        )
+        |
+        filtered["company_id"]
+        .astype(str)
+        .str.lower()
+        .str.contains(
+            search,
+            na=False
+        )
+    ]
 
-filtered = apply_minimum(
-    filtered,
-    "revenue_cagr_5y",
-    revenue_cagr_min,
-)
 
-filtered = apply_minimum(
-    filtered,
-    "pat_cagr_5y",
-    pat_cagr_min,
-)
+# ============================================================
+# KPI SUMMARY
+# ============================================================
 
-filtered = apply_minimum(
-    filtered,
-    "eps_cagr_5y",
-    eps_cagr_min,
-)
+st.divider()
 
-filtered = apply_minimum(
-    filtered,
-    "dividend_yield",
-    dividend_yield_min,
-)
+c1, c2, c3, c4 = st.columns(4)
 
-filtered = apply_minimum(
-    filtered,
-    "fcf",
-    fcf_min,
-)
+
+with c1:
+
+    st.metric(
+        "Companies Matched",
+        len(filtered)
+    )
+
+
+with c2:
+
+    if (
+        "return_on_equity_pct"
+        in filtered.columns
+    ):
+
+        value = filtered[
+            "return_on_equity_pct"
+        ].median()
+
+        st.metric(
+            "Median ROE",
+            "N/A"
+            if pd.isna(value)
+            else f"{value:.2f}%"
+        )
+
+    else:
+
+        st.metric(
+            "Median ROE",
+            "N/A"
+        )
+
+
+with c3:
+
+    if "pe_ratio" in filtered.columns:
+
+        value = filtered[
+            "pe_ratio"
+        ].median()
+
+        st.metric(
+            "Median P/E",
+            "N/A"
+            if pd.isna(value)
+            else f"{value:.2f}"
+        )
+
+    else:
+
+        st.metric(
+            "Median P/E",
+            "N/A"
+        )
+
+
+with c4:
+
+    if (
+        "composite_quality_score"
+        in filtered.columns
+    ):
+
+        value = filtered[
+            "composite_quality_score"
+        ].median()
+
+        st.metric(
+            "Median Quality Score",
+            "N/A"
+            if pd.isna(value)
+            else f"{value:.2f}"
+        )
+
+    else:
+
+        st.metric(
+            "Median Quality Score",
+            "N/A"
+        )
 
 
 # ============================================================
@@ -906,275 +629,265 @@ filtered = apply_minimum(
 st.divider()
 
 st.subheader(
-    "📊 Screening Results"
+    f"Screener Results — {preset}"
 )
 
-result_count = len(filtered)
 
-if result_count == 0:
-
-    st.warning(
-        "No companies match the selected criteria."
-    )
-
-elif result_count < 5:
+if filtered.empty:
 
     st.warning(
-        f"{result_count} companies matched. "
-        "Try relaxing some filters."
+        "No companies match the selected filters."
     )
 
-elif result_count > 50:
-
-    st.info(
-        f"{result_count} companies matched. "
-        "Consider tightening the filters."
-    )
-
-else:
-
-    st.success(
-        f"{result_count} companies matched."
-    )
+    st.stop()
 
 
 # ============================================================
-# SORTING
+# SORT
 # ============================================================
 
-sort_options = {
+sort_options = [
 
-    "Quality Score":
-        "composite_quality_score",
+    "composite_quality_score",
+    "return_on_equity_pct",
+    "revenue_cagr_5yr",
+    "pat_cagr_5yr",
+    "free_cash_flow_cr",
+    "pe_ratio",
+    "pb_ratio",
+    "market_cap_crore",
 
-    "ROE":
-        "roe",
+]
 
-    "ROCE":
-        "roce_percentage",
-
-    "Revenue CAGR 5Y":
-        "revenue_cagr_5y",
-
-    "PAT CAGR 5Y":
-        "pat_cagr_5y",
-
-    "EPS CAGR 5Y":
-        "eps_cagr_5y",
-
-    "P/E":
-        "pe",
-
-    "P/B":
-        "pb",
-
-    "Dividend Yield":
-        "dividend_yield",
-
-    "Market Cap":
-        "market_cap",
-}
-
-
-available_sort_options = {
-    name: column
-    for name, column in sort_options.items()
-    if column in filtered.columns
-}
-
-
-sort_name = st.selectbox(
-    "Sort results by",
-    list(
-        available_sort_options.keys()
-    ),
-)
-
-
-ascending = st.checkbox(
-    "Ascending order",
-    value=False,
-)
-
-
-sort_column = available_sort_options[
-    sort_name
+available_sort_options = [
+    c
+    for c in sort_options
+    if c in filtered.columns
 ]
 
 
-if sort_column in filtered.columns:
-
-    filtered = (
-        filtered
-        .sort_values(
-            sort_column,
-            ascending=ascending,
-            na_position="last",
-        )
-        .reset_index(drop=True)
-    )
-
-
-# ============================================================
-# DISPLAY COLUMNS
-# ============================================================
-
-display_columns = {
-
-    "company_id":
-        "Company ID",
-
-    "company_name":
-        "Company",
-
-    "sector":
-        "Sector",
-
-    "sub_sector":
-        "Sub-Sector",
-
-    "roe":
-        "ROE (%)",
-
-    "debt_to_equity":
-        "D/E",
-
-    "net_profit_margin_pct":
-        "NPM (%)",
-
-    "revenue_cagr_5y":
-        "Revenue CAGR 5Y (%)",
-
-    "pat_cagr_5y":
-        "PAT CAGR 5Y (%)",
-
-    "eps_cagr_5y":
-        "EPS CAGR 5Y (%)",
-
-    "fcf":
-        "FCF (₹ Cr)",
-
-    "pe":
-        "P/E",
-
-    "pb":
-        "P/B",
-
-    "dividend_yield":
-        "Dividend Yield (%)",
-
-    "market_cap":
-        "Market Cap (₹ Cr)",
-
-    "composite_quality_score":
-        "Quality Score",
-}
-
-
-available_display = {
-    column: label
-    for column, label in display_columns.items()
-    if column in filtered.columns
-}
-
-
-table = filtered[
-    list(available_display.keys())
-].rename(
-    columns=available_display
+sort_column = st.selectbox(
+    "Rank companies by",
+    available_sort_options,
+    index=0
 )
 
 
+filtered = filtered.sort_values(
+    sort_column,
+    ascending=False,
+    na_position="last"
+).reset_index(drop=True)
+
+
 # ============================================================
-# ROUND NUMBERS
+# DISPLAY TABLE
 # ============================================================
 
-for column in table.columns:
+display_columns = [
 
-    if column not in [
-        "Company ID",
-        "Company",
-        "Sector",
-        "Sub-Sector",
-    ]:
+    "company_id",
+    "company_name",
+    "sector",
 
-        table[column] = pd.to_numeric(
-            table[column],
-            errors="coerce",
-        ).round(2)
+    "return_on_equity_pct",
+    "debt_to_equity",
+
+    "net_profit_margin_pct",
+    "operating_profit_margin_pct",
+
+    "revenue_cagr_5yr",
+    "pat_cagr_5yr",
+
+    "free_cash_flow_cr",
+
+    "pe_ratio",
+    "pb_ratio",
+    "dividend_yield_pct",
+
+    "interest_coverage",
+    "composite_quality_score",
+
+]
+
+
+display_columns = [
+    c
+    for c in display_columns
+    if c in filtered.columns
+]
+
+
+display_df = filtered[
+    display_columns
+].copy()
+
+
+# Rename for dashboard
+
+display_df = display_df.rename(
+    columns={
+        "company_id": "Ticker",
+        "company_name": "Company",
+        "sector": "Sector",
+
+        "return_on_equity_pct": "ROE %",
+        "debt_to_equity": "D/E",
+
+        "net_profit_margin_pct": "NPM %",
+        "operating_profit_margin_pct": "OPM %",
+
+        "revenue_cagr_5yr": "Revenue CAGR 5Y %",
+        "pat_cagr_5yr": "PAT CAGR 5Y %",
+
+        "free_cash_flow_cr": "FCF ₹ Cr",
+
+        "pe_ratio": "P/E",
+        "pb_ratio": "P/B",
+        "dividend_yield_pct": "Dividend Yield %",
+
+        "interest_coverage": "Interest Coverage",
+
+        "composite_quality_score":
+            "Quality Score",
+    }
+)
 
 
 st.dataframe(
-    table,
-    width="stretch",
+    display_df,
+    use_container_width=True,
     hide_index=True,
-    height=600,
 )
 
 
 # ============================================================
-# CSV EXPORT
+# DOWNLOAD CSV
 # ============================================================
 
-st.divider()
-
-st.subheader(
-    "📥 Export Results"
-)
-
-csv_data = table.to_csv(
+csv = display_df.to_csv(
     index=False
 ).encode("utf-8")
 
 
 st.download_button(
-    label="Download Screener Results CSV",
-    data=csv_data,
-    file_name="nifty100_screener_results.csv",
+    label="⬇ Download Screener CSV",
+    data=csv,
+    file_name="nifty100_screener.csv",
     mime="text/csv",
-    width="stretch",
 )
 
 
 # ============================================================
-# TOP RESULTS
+# QUALITY SCORE CHART
 # ============================================================
 
-if not filtered.empty:
+if (
+    "composite_quality_score"
+    in filtered.columns
+):
 
     st.divider()
 
     st.subheader(
-        "🏆 Top 10 Results"
+        "Top Companies by Quality Score"
     )
 
-    top10 = filtered.head(10).copy()
-
-    top_columns = [
-        "company_id",
-        "company_name",
-        "sector",
-        "roe",
-        "debt_to_equity",
-        "revenue_cagr_5y",
-        "composite_quality_score",
-    ]
-
-    top_columns = [
-        c
-        for c in top_columns
-        if c in top10.columns
-    ]
-
-    st.dataframe(
-        top10[
-            top_columns
-        ].round(2)
-        if top_columns
-        else top10,
-        width="stretch",
-        hide_index=True,
+    chart_df = (
+        filtered[
+            [
+                "company_name",
+                "composite_quality_score"
+            ]
+        ]
+        .dropna()
+        .sort_values(
+            "composite_quality_score",
+            ascending=False
+        )
+        .head(15)
     )
+
+    if not chart_df.empty:
+
+        fig = px.bar(
+            chart_df,
+            x="composite_quality_score",
+            y="company_name",
+            orientation="h",
+            title="Top 15 Quality Companies",
+            labels={
+                "company_name": "Company",
+                "composite_quality_score":
+                    "Quality Score"
+            },
+        )
+
+        fig.update_layout(
+            height=600
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
+
+
+# ============================================================
+# ROE VS P/E
+# ============================================================
+
+if (
+    "return_on_equity_pct" in filtered.columns
+    and "pe_ratio" in filtered.columns
+):
+
+    st.divider()
+
+    st.subheader(
+        "ROE vs P/E"
+    )
+
+    scatter_df = filtered[
+        [
+            "company_name",
+            "return_on_equity_pct",
+            "pe_ratio",
+            "composite_quality_score"
+        ]
+    ].dropna(
+        subset=[
+            "return_on_equity_pct",
+            "pe_ratio"
+        ]
+    )
+
+    if not scatter_df.empty:
+
+        fig = px.scatter(
+            scatter_df,
+            x="pe_ratio",
+            y="return_on_equity_pct",
+            size="composite_quality_score"
+            if "composite_quality_score"
+            in scatter_df.columns
+            else None,
+            hover_name="company_name",
+            title="ROE vs P/E Valuation",
+            labels={
+                "pe_ratio": "P/E",
+                "return_on_equity_pct": "ROE (%)"
+            },
+        )
+
+        fig.update_layout(
+            height=600
+        )
+
+        st.plotly_chart(
+            fig,
+            use_container_width=True
+        )
 
 
 # ============================================================
@@ -1184,7 +897,7 @@ if not filtered.empty:
 st.divider()
 
 st.caption(
-    f"NIFTY 100 Screener | "
-    f"Universe: {total_companies} companies | "
-    f"Results: {result_count}"
+    f"Showing {len(filtered)} of "
+    f"{len(screener)} companies | "
+    f"Screener: {preset}"
 )
