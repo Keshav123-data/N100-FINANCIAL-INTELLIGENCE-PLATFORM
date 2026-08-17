@@ -1,0 +1,31 @@
+filters:
+
+  roe_min: 15
+
+  de_max: 1.0
+
+  fcf_min: 0
+
+  revenue_cagr5_min: 10
+
+  pat_cagr5_min: 10
+
+  opm_min: 15
+
+  pe_max: 25
+
+  pb_max: 4
+
+  dividend_yield_min: 1
+
+  icr_min: 3
+
+  market_cap_min: 1000
+
+  net_profit_min: 100
+
+  eps_cagr_min: 10
+
+  asset_turnover_min: 0.5
+
+  sales_min: 1000
