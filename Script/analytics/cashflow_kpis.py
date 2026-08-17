@@ -1,111 +1,1562 @@
-def free_cash_flow(operating_activity, investing_activity):
+from pathlib import Path
+import sqlite3
+import numpy as np
+import pandas as pd
+import re
+
+
+# ======================================================================
+# PATHS
+# ======================================================================
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+DATABASE_PATH = PROJECT_ROOT / "DB" / "nifty100.db"
+
+OUTPUT_DIR = PROJECT_ROOT / "output"
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+INTELLIGENCE_FILE = (
+    OUTPUT_DIR / "cashflow_intelligence.xlsx"
+)
+
+DISTRESS_FILE = (
+    OUTPUT_DIR / "distress_alerts.csv"
+)
+
+
+# ======================================================================
+# DATABASE
+# ======================================================================
+
+def get_connection():
+    return sqlite3.connect(DATABASE_PATH)
+
+
+# ======================================================================
+# LOAD DATA
+# ======================================================================
+
+def load_data():
+
+    print()
+    print("=" * 70)
+    print("LOADING CASH FLOW DATA")
+    print("=" * 70)
+
+    conn = get_connection()
+
+    try:
+
+        companies = pd.read_sql_query(
+            """
+            SELECT
+                id AS company_id,
+                company_name
+            FROM companies
+            """,
+            conn
+        )
+
+        cashflow = pd.read_sql_query(
+            """
+            SELECT
+                company_id,
+                year,
+                operating_activity,
+                investing_activity,
+                financing_activity,
+                net_cash_flow
+            FROM cashflow
+            """,
+            conn
+        )
+
+        pnl = pd.read_sql_query(
+            """
+            SELECT
+                company_id,
+                year,
+                sales,
+                net_profit
+            FROM profitandloss
+            """,
+            conn
+        )
+
+        ratios = pd.read_sql_query(
+            """
+            SELECT
+                company_id,
+                year,
+                free_cash_flow_cr,
+                revenue_cagr_5yr,
+                pat_cagr_5yr,
+                total_debt_cr
+            FROM financial_ratios
+            """,
+            conn
+        )
+
+        sectors = pd.read_sql_query(
+            """
+            SELECT
+                company_id,
+                broad_sector AS sector
+            FROM sectors
+            """,
+            conn
+        )
+
+    finally:
+        conn.close()
+
+
+
+    # ============================================================
+# NORMALIZE YEAR COLUMNS
+# ============================================================
+
+def normalize_financial_year(value):
     """
-    FCF = CFO + CFI
+    Convert mixed financial-year formats into integer years.
 
-    Investing activity is usually negative.
-    Negative FCF is allowed.
+    Examples:
+        'Dec 2012'       -> 2012
+        'Mar 2013'       -> 2013
+        'Mar-13'         -> 2013
+        'Mar-24'         -> 2024
+        'Mar 2023 15'    -> 2023
+        'TTM'            -> NaN
     """
+    if pd.isna(value):
+        return pd.NA
 
-    if operating_activity is None or investing_activity is None:
-        return None
+    value = str(value).strip()
 
-    return operating_activity + investing_activity
+    # Ignore non-annual TTM records
+    if value.upper() == "TTM":
+        return pd.NA
 
-def cfo_quality_score(cfo, pat):
-    """
-    CFO / PAT
-    """
+    # Four-digit year anywhere in the string
+    match = re.search(r"(20\d{2})", value)
 
-    if pat is None or pat == 0:
-        return None, "N/A"
+    if match:
+        return int(match.group(1))
 
-    score = cfo / pat
+    # Handle two-digit formats such as Mar-13
+    match = re.search(r"[-/](\d{2})$", value)
 
-    if score > 1:
-        label = "High Quality"
+    if match:
+        yy = int(match.group(1))
 
-    elif score >= 0.5:
-        label = "Moderate"
+        # Financial data in this project is 2011–2024
+        return 2000 + yy
+
+    return pd.NA
+
+
+    cashflow["year"] = cashflow["year"].apply(normalize_financial_year)
+    profitandloss["year"] = profitandloss["year"].apply(normalize_financial_year)
+
+    cashflow["year"] = pd.to_numeric(cashflow["year"], errors="coerce").astype("Int64")
+    profitandloss["year"] = pd.to_numeric(
+    profitandloss["year"],
+    errors="coerce"
+    ).astype("Int64")
+
+# Remove rows whose year cannot be interpreted
+    cashflow = cashflow.dropna(subset=["year"]).copy()
+    profitandloss = profitandloss.dropna(subset=["year"]).copy()
+
+# Convert nullable integer to normal integer
+    cashflow["year"] = cashflow["year"].astype(int)
+    profitandloss["year"] = profitandloss["year"].astype(int)
+
+    # --------------------------------------------------------------
+    # Numeric conversion
+    # --------------------------------------------------------------
+
+    for df in [cashflow, pnl, ratios]:
+
+        if "year" in df.columns:
+            df["year"] = pd.to_numeric(
+                df["year"],
+                errors="coerce"
+            )
+
+        if "company_id" in df.columns:
+            df["company_id"] = (
+                df["company_id"]
+                .astype(str)
+                .str.strip()
+            )
+
+    # --------------------------------------------------------------
+    # Remove invalid rows
+    # --------------------------------------------------------------
+
+    cashflow = cashflow.dropna(
+        subset=["company_id", "year"]
+    )
+
+    pnl = pnl.dropna(
+        subset=["company_id", "year"]
+    )
+
+    ratios = ratios.dropna(
+        subset=["company_id", "year"]
+    )
+
+    print(
+        f"Companies       : {len(companies)}"
+    )
+
+    print(
+        f"Cash Flow rows  : {len(cashflow)}"
+    )
+
+    print(
+        f"Profit & Loss   : {len(pnl)}"
+    )
+
+    print(
+        f"Financial ratios: {len(ratios)}"
+    )
+
+    print(
+        f"Sectors         : {len(sectors)}"
+    )
+
+    return (
+        companies,
+        cashflow,
+        pnl,
+        ratios,
+        sectors
+    )
+
+
+# ======================================================================
+# CFO QUALITY
+# ======================================================================
+
+def calculate_cfo_quality(
+    cashflow,
+    pnl
+):
+
+    print()
+    print("=" * 70)
+    print("CALCULATING CFO QUALITY")
+    print("=" * 70)
+
+    df = cashflow.merge(
+        pnl[
+            [
+                "company_id",
+                "year",
+                "sales",
+                "net_profit"
+            ]
+        ],
+        on=[
+            "company_id",
+            "year"
+        ],
+        how="left"
+    )
+
+    # --------------------------------------------------------------
+    # CFO / PAT
+    # --------------------------------------------------------------
+
+    df["cfo_pat_ratio"] = np.where(
+        df["net_profit"].abs() > 1e-9,
+        df["operating_activity"] /
+        df["net_profit"],
+        np.nan
+    )
+
+    # Remove infinite values
+
+    df["cfo_pat_ratio"] = (
+        df["cfo_pat_ratio"]
+        .replace(
+            [np.inf, -np.inf],
+            np.nan
+        )
+    )
+
+    # --------------------------------------------------------------
+    # Latest 5 years
+    # --------------------------------------------------------------
+
+    df = (
+        df
+        .sort_values(
+            ["company_id", "year"]
+        )
+        .groupby("company_id", group_keys=False)
+        .tail(5)
+    )
+
+    # --------------------------------------------------------------
+    # Average CFO / PAT
+    # --------------------------------------------------------------
+
+    quality = (
+        df
+        .groupby("company_id")
+        .agg(
+            cfo_quality_score=(
+                "cfo_pat_ratio",
+                "mean"
+            )
+        )
+        .reset_index()
+    )
+
+    # --------------------------------------------------------------
+    # Labels
+    # --------------------------------------------------------------
+
+    def quality_label(value):
+
+        if pd.isna(value):
+            return "Accrual Risk"
+
+        if value > 1.0:
+            return "High Quality"
+
+        if value >= 0.5:
+            return "Moderate"
+
+        return "Accrual Risk"
+
+    quality["cfo_quality_label"] = (
+        quality[
+            "cfo_quality_score"
+        ].apply(quality_label)
+    )
+
+    print(
+        "CFO quality calculated for "
+        f"{len(quality)} companies."
+    )
+
+    return quality, df
+
+
+# ======================================================================
+# CAPEX INTENSITY
+# ======================================================================
+
+def calculate_capex_intensity(
+    cashflow,
+    pnl
+):
+
+    print()
+    print("=" * 70)
+    print("CALCULATING CAPEX INTENSITY")
+    print("=" * 70)
+
+    df = cashflow.merge(
+        pnl[
+            [
+                "company_id",
+                "year",
+                "sales"
+            ]
+        ],
+        on=[
+            "company_id",
+            "year"
+        ],
+        how="left"
+    )
+
+    # --------------------------------------------------------------
+    # CapEx proxy
+    #
+    # investing_activity is used because the database does not have
+    # a separate capex column.
+    # --------------------------------------------------------------
+
+    df["capex_intensity_pct"] = np.where(
+        df["sales"].abs() > 1e-9,
+        (
+            df["investing_activity"].abs()
+            /
+            df["sales"].abs()
+        ) * 100,
+        np.nan
+    )
+
+    # --------------------------------------------------------------
+    # Latest year
+    # --------------------------------------------------------------
+
+    latest = (
+        df
+        .sort_values("year")
+        .groupby("company_id")
+        .tail(1)
+        .copy()
+    )
+
+    # --------------------------------------------------------------
+    # Labels
+    # --------------------------------------------------------------
+
+    def capex_label(value):
+
+        if pd.isna(value):
+            return "Unknown"
+
+        if value < 3:
+            return "Asset Light"
+
+        if value <= 8:
+            return "Moderate"
+
+        return "Capital Intensive"
+
+    latest["capex_label"] = (
+        latest[
+            "capex_intensity_pct"
+        ].apply(capex_label)
+    )
+
+    result = latest[
+        [
+            "company_id",
+            "capex_intensity_pct",
+            "capex_label"
+        ]
+    ].copy()
+
+    print(
+        f"CapEx intensity calculated for "
+        f"{len(result)} companies."
+    )
+
+    return result
+
+
+# ======================================================================
+# FCF METRICS
+# ======================================================================
+
+def calculate_fcf_metrics(
+    cashflow,
+    pnl,
+    ratios
+):
+
+    print()
+    print("=" * 70)
+    print("CALCULATING FCF METRICS")
+    print("=" * 70)
+
+    # --------------------------------------------------------------
+    # Latest ratio record
+    # --------------------------------------------------------------
+
+    latest_ratios = (
+        ratios
+        .sort_values("year")
+        .groupby("company_id")
+        .tail(1)
+        .copy()
+    )
+
+    # --------------------------------------------------------------
+    # Latest P&L
+    # --------------------------------------------------------------
+
+    latest_pnl = (
+        pnl
+        .sort_values("year")
+        .groupby("company_id")
+        .tail(1)
+        .copy()
+    )
+
+    # --------------------------------------------------------------
+    # Latest cash flow
+    # --------------------------------------------------------------
+
+    latest_cf = (
+        cashflow
+        .sort_values("year")
+        .groupby("company_id")
+        .tail(1)
+        .copy()
+    )
+
+    # --------------------------------------------------------------
+    # Merge
+    # --------------------------------------------------------------
+
+    result = latest_ratios[
+        [
+            "company_id",
+            "free_cash_flow_cr",
+            "revenue_cagr_5yr",
+            "pat_cagr_5yr",
+            "total_debt_cr"
+        ]
+    ].copy()
+
+    result = result.merge(
+        latest_pnl[
+            [
+                "company_id",
+                "sales",
+                "net_profit"
+            ]
+        ],
+        on="company_id",
+        how="left"
+    )
+
+    result = result.merge(
+        latest_cf[
+            [
+                "company_id",
+                "operating_activity"
+            ]
+        ],
+        on="company_id",
+        how="left"
+    )
+
+    # --------------------------------------------------------------
+    # FCF conversion
+    #
+    # FCF / Net Profit * 100
+    # --------------------------------------------------------------
+
+    result["fcf_conversion_pct"] = np.where(
+        result["net_profit"].abs() > 1e-9,
+        (
+            result["free_cash_flow_cr"]
+            /
+            result["net_profit"]
+        ) * 100,
+        np.nan
+    )
+
+    result["fcf_conversion_pct"] = (
+        result["fcf_conversion_pct"]
+        .replace(
+            [np.inf, -np.inf],
+            np.nan
+        )
+    )
+
+    return result
+
+
+# ======================================================================
+# DISTRESS SIGNAL
+# ======================================================================
+
+def calculate_distress(
+    cashflow,
+    pnl
+):
+
+    print()
+    print("=" * 70)
+    print("DETECTING DISTRESS SIGNALS")
+    print("=" * 70)
+
+    latest_cf = (
+        cashflow
+        .sort_values("year")
+        .groupby("company_id")
+        .tail(1)
+        .copy()
+    )
+
+    latest_pnl = (
+        pnl
+        .sort_values("year")
+        .groupby("company_id")
+        .tail(1)
+        .copy()
+    )
+
+    result = latest_cf[
+        [
+            "company_id",
+            "year",
+            "operating_activity",
+            "financing_activity"
+        ]
+    ].copy()
+
+    result = result.merge(
+        latest_pnl[
+            [
+                "company_id",
+                "net_profit"
+            ]
+        ],
+        on="company_id",
+        how="left"
+    )
+
+    # --------------------------------------------------------------
+    # CFO < 0 AND CFF > 0
+    # --------------------------------------------------------------
+
+    result["distress_flag"] = (
+        (
+            result["operating_activity"] < 0
+        )
+        &
+        (
+            result["financing_activity"] > 0
+        )
+    )
+
+    distress_count = int(
+        result["distress_flag"].sum()
+    )
+
+    print(
+        f"Distress signals detected: "
+        f"{distress_count}"
+    )
+
+    return result
+
+
+# ======================================================================
+# DELEVERAGING
+# ======================================================================
+
+def calculate_deleveraging(
+    cashflow,
+    ratios
+):
+
+    print()
+    print("=" * 70)
+    print("DETECTING DELEVERAGING")
+    print("=" * 70)
+
+    df = cashflow.merge(
+        ratios[
+            [
+                "company_id",
+                "year",
+                "total_debt_cr"
+            ]
+        ],
+        on=[
+            "company_id",
+            "year"
+        ],
+        how="left"
+    )
+
+    df = df.sort_values(
+        [
+            "company_id",
+            "year"
+        ]
+    )
+
+    df["previous_debt"] = (
+        df
+        .groupby("company_id")[
+            "total_debt_cr"
+        ]
+        .shift(1)
+    )
+
+    df["debt_declining"] = (
+        df["total_debt_cr"]
+        <
+        df["previous_debt"]
+    )
+
+    # CFF < 0 + debt declining
+
+    df["deleveraging_flag"] = (
+        (
+            df["financing_activity"] < 0
+        )
+        &
+        df["debt_declining"]
+    )
+
+    latest = (
+        df
+        .groupby("company_id")
+        .tail(1)
+        [
+            [
+                "company_id",
+                "deleveraging_flag"
+            ]
+        ]
+        .copy()
+    )
+
+    print(
+        "Deleveraging companies:",
+        int(
+            latest[
+                "deleveraging_flag"
+            ].sum()
+        )
+    )
+
+    return latest
+
+
+# ======================================================================
+# CAPITAL ALLOCATION
+# ======================================================================
+
+def calculate_capital_allocation(
+    cashflow,
+    pnl
+):
+
+    print()
+    print("=" * 70)
+    print("CALCULATING CAPITAL ALLOCATION")
+    print("=" * 70)
+
+    df = cashflow.merge(
+        pnl[
+            [
+                "company_id",
+                "year",
+                "sales",
+                "net_profit"
+            ]
+        ],
+        on=[
+            "company_id",
+            "year"
+        ],
+        how="left"
+    )
+
+    # --------------------------------------------------------------
+    # FCF proxy
+    # --------------------------------------------------------------
+
+    df["fcf"] = (
+        df["operating_activity"]
+        +
+        df["investing_activity"]
+    )
+
+    # --------------------------------------------------------------
+    # Classification
+    # --------------------------------------------------------------
+
+    def classify(row):
+
+        cfo = row["operating_activity"]
+        cfi = row["investing_activity"]
+        cff = row["financing_activity"]
+        profit = row["net_profit"]
+
+        if (
+            cfo < 0
+            and cff > 0
+        ):
+            return "Distress Signal"
+
+        if (
+            cfo > 0
+            and cfi < 0
+            and cff < 0
+        ):
+            return "Reinvestor"
+
+        if (
+            cfo > 0
+            and cfi > 0
+            and cff < 0
+        ):
+            return "Cash Generator"
+
+        if (
+            cfo > 0
+            and cff > 0
+        ):
+            return "Debt / Capital Raiser"
+
+        if (
+            cfo > 0
+            and cfi < 0
+            and cff >= 0
+        ):
+            return "Growth Investor"
+
+        if (
+            cfo > 0
+            and cfi >= 0
+            and cff >= 0
+        ):
+            return "Cash Accumulator"
+
+        if (
+            cfo < 0
+            and profit > 0
+        ):
+            return "Accrual Risk"
+
+        return "Mixed"
+
+    df["capital_allocation_label"] = (
+        df.apply(
+            classify,
+            axis=1
+        )
+    )
+
+    latest = (
+        df
+        .sort_values("year")
+        .groupby("company_id")
+        .tail(1)
+        [
+            [
+                "company_id",
+                "capital_allocation_label"
+            ]
+        ]
+        .copy()
+    )
+
+    print(
+        "Capital allocation classified for:",
+        len(latest),
+        "companies"
+    )
+
+    return latest
+
+
+# ======================================================================
+# MAIN INTELLIGENCE DATASET
+# ======================================================================
+
+def build_intelligence():
+
+    (
+        companies,
+        cashflow,
+        pnl,
+        ratios,
+        sectors
+    ) = load_data()
+
+    # --------------------------------------------------------------
+    # CFO quality
+    # --------------------------------------------------------------
+
+    cfo_quality, cfo_history = (
+        calculate_cfo_quality(
+            cashflow,
+            pnl
+        )
+    )
+
+    # --------------------------------------------------------------
+    # CapEx
+    # --------------------------------------------------------------
+
+    capex = calculate_capex_intensity(
+        cashflow,
+        pnl
+    )
+
+    # --------------------------------------------------------------
+    # FCF
+    # --------------------------------------------------------------
+
+    fcf = calculate_fcf_metrics(
+        cashflow,
+        pnl,
+        ratios
+    )
+
+    # --------------------------------------------------------------
+    # Distress
+    # --------------------------------------------------------------
+
+    distress = calculate_distress(
+        cashflow,
+        pnl
+    )
+
+    # --------------------------------------------------------------
+    # Deleveraging
+    # --------------------------------------------------------------
+
+    deleveraging = calculate_deleveraging(
+        cashflow,
+        ratios
+    )
+
+    # --------------------------------------------------------------
+    # Capital allocation
+    # --------------------------------------------------------------
+
+    capital = calculate_capital_allocation(
+        cashflow,
+        pnl
+    )
+
+    # --------------------------------------------------------------
+    # Company base
+    # --------------------------------------------------------------
+
+    result = companies[
+        [
+            "company_id",
+            "company_name"
+        ]
+    ].copy()
+
+    # --------------------------------------------------------------
+    # Sector
+    # --------------------------------------------------------------
+
+    if not sectors.empty:
+
+        sectors_clean = (
+            sectors
+            .drop_duplicates(
+                subset=["company_id"]
+            )
+        )
+
+        result = result.merge(
+            sectors_clean,
+            on="company_id",
+            how="left"
+        )
 
     else:
-        label = "Accrual Risk"
 
-    return round(score, 2), label
+        result["sector"] = "Unknown"
 
-def capex_intensity(investing_activity, sales):
-    """
-    abs(CFI) / Sales ×100
-    """
+    # --------------------------------------------------------------
+    # Merge all intelligence
+    # --------------------------------------------------------------
 
-    if sales is None or sales == 0:
-        return None, "N/A"
+    result = result.merge(
+        cfo_quality,
+        on="company_id",
+        how="left"
+    )
 
-    intensity = abs(investing_activity) / sales * 100
+    result = result.merge(
+        capex,
+        on="company_id",
+        how="left"
+    )
 
-    if intensity < 3:
-        label = "Asset Light"
+    result = result.merge(
+        fcf[
+            [
+                "company_id",
+                "free_cash_flow_cr",
+                "revenue_cagr_5yr",
+                "pat_cagr_5yr",
+                "fcf_conversion_pct"
+            ]
+        ],
+        on="company_id",
+        how="left"
+    )
 
-    elif intensity <= 8:
-        label = "Moderate"
+    result = result.merge(
+        distress[
+            [
+                "company_id",
+                "operating_activity",
+                "financing_activity",
+                "net_profit",
+                "distress_flag"
+            ]
+        ],
+        on="company_id",
+        how="left"
+    )
 
-    else:
-        label = "Capital Intensive"
+    result = result.merge(
+        deleveraging,
+        on="company_id",
+        how="left"
+    )
 
-    return round(intensity, 2), label
+    result = result.merge(
+        capital,
+        on="company_id",
+        how="left"
+    )
 
-def fcf_conversion_rate(fcf, operating_profit):
-    """
-    FCF / Operating Profit ×100
-    """
+    # --------------------------------------------------------------
+    # Final column names
+    # --------------------------------------------------------------
 
-    if operating_profit is None or operating_profit == 0:
-        return None
+    result = result.rename(
+        columns={
+            "free_cash_flow_cr":
+                "fcf_cagr_5yr"
+        }
+    )
 
-    return round((fcf / operating_profit) * 100, 2)
+    # IMPORTANT:
+    # The database contains free_cash_flow_cr, but not a dedicated
+    # fcf_cagr_5yr column. Therefore we preserve the requested
+    # output name only as a placeholder when CAGR is unavailable.
+    #
+    # Better approach: calculate actual CAGR below.
 
-def capital_allocation_pattern(cfo, cfi, cff, cfo_pat_ratio=None):
-    """
-    8-pattern classifier
-    """
+    # --------------------------------------------------------------
+    # Calculate actual 5-year FCF CAGR
+    # --------------------------------------------------------------
 
-    cfo_sign = "+" if cfo >= 0 else "-"
-    cfi_sign = "+" if cfi >= 0 else "-"
-    cff_sign = "+" if cff >= 0 else "-"
+    fcf_history = ratios[
+        [
+            "company_id",
+            "year",
+            "free_cash_flow_cr"
+        ]
+    ].copy()
 
-    signs = (cfo_sign, cfi_sign, cff_sign)
+    fcf_history = (
+        fcf_history
+        .sort_values(
+            [
+                "company_id",
+                "year"
+            ]
+        )
+    )
 
-    if signs == ("+", "-", "-"):
+    def fcf_cagr(group):
 
-        if cfo_pat_ratio and cfo_pat_ratio > 1:
-            label = "Shareholder Returns"
+        group = group.dropna(
+            subset=["free_cash_flow_cr"]
+        )
+
+        if len(group) < 2:
+            return np.nan
+
+        start = group.iloc[0][
+            "free_cash_flow_cr"
+        ]
+
+        end = group.iloc[-1][
+            "free_cash_flow_cr"
+        ]
+
+        years = (
+            group.iloc[-1]["year"]
+            -
+            group.iloc[0]["year"]
+        )
+
+        if (
+            years <= 0
+            or start <= 0
+            or end <= 0
+        ):
+            return np.nan
+
+        return (
+            (
+                end / start
+            )
+            **
+            (1 / years)
+            - 1
+        ) * 100
+
+    cagr_df = (
+        fcf_history
+        .groupby("company_id")
+        .apply(
+            fcf_cagr,
+            include_groups=False
+        )
+        .reset_index(
+            name="fcf_cagr_5yr"
+        )
+    )
+
+    # Replace placeholder
+
+    if "fcf_cagr_5yr" in result.columns:
+        result = result.drop(
+            columns=["fcf_cagr_5yr"]
+        )
+
+    result = result.merge(
+        cagr_df,
+        on="company_id",
+        how="left"
+    )
+
+    # --------------------------------------------------------------
+    # Fill boolean columns
+    # --------------------------------------------------------------
+
+    result["distress_flag"] = (
+        result["distress_flag"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    result["deleveraging_flag"] = (
+        result["deleveraging_flag"]
+        .fillna(False)
+        .astype(bool)
+    )
+
+    # --------------------------------------------------------------
+    # Round values
+    # --------------------------------------------------------------
+
+    numeric_columns = [
+        "cfo_quality_score",
+        "capex_intensity_pct",
+        "fcf_cagr_5yr",
+        "fcf_conversion_pct",
+        "revenue_cagr_5yr",
+        "pat_cagr_5yr"
+    ]
+
+    for col in numeric_columns:
+
+        if col in result.columns:
+
+            result[col] = pd.to_numeric(
+                result[col],
+                errors="coerce"
+            ).round(2)
+
+    # --------------------------------------------------------------
+    # Required output order
+    # --------------------------------------------------------------
+
+    preferred_columns = [
+
+        "company_id",
+        "company_name",
+        "sector",
+
+        "cfo_quality_score",
+        "cfo_quality_label",
+
+        "capex_intensity_pct",
+        "capex_label",
+
+        "fcf_cagr_5yr",
+        "fcf_conversion_pct",
+
+        "distress_flag",
+        "deleveraging_flag",
+
+        "capital_allocation_label"
+    ]
+
+    columns = [
+        c
+        for c in preferred_columns
+        if c in result.columns
+    ]
+
+    result = result[
+        columns
+    ].copy()
+
+    return (
+        result,
+        distress
+    )
+
+
+# ======================================================================
+# SAVE EXCEL
+# ======================================================================
+
+def save_intelligence(
+    intelligence_df
+):
+
+    print()
+    print("=" * 70)
+    print("SAVING CASH FLOW INTELLIGENCE")
+    print("=" * 70)
+
+    intelligence_df.to_excel(
+        INTELLIGENCE_FILE,
+        index=False,
+        engine="openpyxl"
+    )
+
+    print(
+        f"✓ Saved: {INTELLIGENCE_FILE}"
+    )
+
+    print(
+        f"  Rows: {len(intelligence_df)}"
+    )
+
+    print(
+        f"  Columns: {len(intelligence_df.columns)}"
+    )
+
+
+# ======================================================================
+# SAVE DISTRESS ALERTS
+# ======================================================================
+
+def save_distress_alerts(
+    distress_df
+):
+
+    print()
+    print("=" * 70)
+    print("SAVING DISTRESS ALERTS")
+    print("=" * 70)
+
+    alerts = distress_df[
+        distress_df["distress_flag"]
+    ].copy()
+
+    alerts = alerts[
+        [
+            "company_id",
+            "year",
+            "operating_activity",
+            "financing_activity",
+            "net_profit",
+            "distress_flag"
+        ]
+    ]
+
+    alerts.to_csv(
+        DISTRESS_FILE,
+        index=False
+    )
+
+    print(
+        f"✓ Saved: {DISTRESS_FILE}"
+    )
+
+    print(
+        f"  Alerts: {len(alerts)}"
+    )
+
+    return alerts
+
+
+# ======================================================================
+# VALIDATION
+# ======================================================================
+
+def validate(
+    intelligence_df
+):
+
+    print()
+    print("=" * 70)
+    print("DAY 31 VALIDATION")
+    print("=" * 70)
+
+    company_count = (
+        intelligence_df[
+            "company_id"
+        ]
+        .nunique()
+    )
+
+    print(
+        f"Companies in output : {company_count}"
+    )
+
+    required_columns = [
+
+        "company_id",
+        "sector",
+
+        "cfo_quality_score",
+        "cfo_quality_label",
+
+        "capex_intensity_pct",
+        "capex_label",
+
+        "fcf_cagr_5yr",
+        "fcf_conversion_pct",
+
+        "distress_flag",
+        "deleveraging_flag",
+
+        "capital_allocation_label"
+    ]
+
+    print()
+    print("Required columns:")
+
+    missing = []
+
+    for column in required_columns:
+
+        if column in intelligence_df.columns:
+
+            print(
+                f"  ✓ {column}"
+            )
+
         else:
-            label = "Reinvestor"
 
-    elif signs == ("+", "+", "-"):
-        label = "Liquidating Assets"
+            print(
+                f"  ✗ {column}"
+            )
 
-    elif signs == ("-", "+", "+"):
-        label = "Distress Signal"
+            missing.append(column)
 
-    elif signs == ("-", "-", "+"):
-        label = "Growth Funded by Debt"
+    if missing:
 
-    elif signs == ("+", "+", "+"):
-        label = "Cash Accumulator"
+        raise ValueError(
+            "Missing required columns: "
+            + ", ".join(missing)
+        )
 
-    elif signs == ("-", "-", "-"):
-        label = "Pre-Revenue"
+    # --------------------------------------------------------------
+    # Coverage
+    # --------------------------------------------------------------
 
-    elif signs == ("+", "-", "+"):
-        label = "Mixed"
+    if company_count < 92:
+
+        print()
+        print(
+            f"WARNING: Expected 92 companies, "
+            f"found {company_count}"
+        )
 
     else:
-        label = "Other"
 
-    return {
-        "cfo_sign": cfo_sign,
-        "cfi_sign": cfi_sign,
-        "cff_sign": cff_sign,
-        "pattern_label": label
-    }
+        print()
+        print(
+            "✓ All 92 companies represented."
+        )
 
+    # --------------------------------------------------------------
+    # Duplicate check
+    # --------------------------------------------------------------
+
+    duplicates = (
+        intelligence_df[
+            "company_id"
+        ].duplicated()
+        .sum()
+    )
+
+    print(
+        f"Duplicate companies : {duplicates}"
+    )
+
+    if duplicates > 0:
+
+        raise ValueError(
+            "Duplicate company records detected."
+        )
+
+    # --------------------------------------------------------------
+    # Labels
+    # --------------------------------------------------------------
+
+    print()
+    print("CFO Quality distribution:")
+
+    print(
+        intelligence_df[
+            "cfo_quality_label"
+        ]
+        .value_counts(
+            dropna=False
+        )
+        .to_string()
+    )
+
+    print()
+    print("CapEx distribution:")
+
+    print(
+        intelligence_df[
+            "capex_label"
+        ]
+        .value_counts(
+            dropna=False
+        )
+        .to_string()
+    )
+
+    print()
+    print("Capital allocation distribution:")
+
+    print(
+        intelligence_df[
+            "capital_allocation_label"
+        ]
+        .value_counts(
+            dropna=False
+        )
+        .to_string()
+    )
+
+
+# ======================================================================
+# MAIN
+# ======================================================================
+
+def main():
+
+    print()
+    print("=" * 70)
+    print("SPRINT 5 — DAY 31")
+    print("CASH FLOW INTELLIGENCE MODULE")
+    print("=" * 70)
+
+    print()
+    print(
+        f"Project root : {PROJECT_ROOT}"
+    )
+
+    print(
+        f"Database     : {DATABASE_PATH}"
+    )
+
+    print(
+        f"Output       : {OUTPUT_DIR}"
+    )
+
+    try:
+
+        # ----------------------------------------------------------
+        # Build
+        # ----------------------------------------------------------
+
+        (
+            intelligence,
+            distress
+        ) = build_intelligence()
+
+        # ----------------------------------------------------------
+        # Validate
+        # ----------------------------------------------------------
+
+        validate(
+            intelligence
+        )
+
+        # ----------------------------------------------------------
+        # Save Excel
+        # ----------------------------------------------------------
+
+        save_intelligence(
+            intelligence
+        )
+
+        # ----------------------------------------------------------
+        # Save distress
+        # ----------------------------------------------------------
+
+        alerts = save_distress_alerts(
+            distress
+        )
+
+        # ----------------------------------------------------------
+        # Preview
+        # ----------------------------------------------------------
+
+        print()
+        print("=" * 70)
+        print("SAMPLE CASH FLOW INTELLIGENCE")
+        print("=" * 70)
+
+        print(
+            intelligence
+            .head(10)
+            .to_string(
+                index=False
+            )
+        )
+
+        # ----------------------------------------------------------
+        # Final
+        # ----------------------------------------------------------
+
+        print()
+        print("=" * 70)
+        print("SPRINT 5 — DAY 31 COMPLETED")
+        print("=" * 70)
+
+        print()
+        print("Generated files:")
+
+        print(
+            f"  ✓ {INTELLIGENCE_FILE}"
+        )
+
+        print(
+            f"  ✓ {DISTRESS_FILE}"
+        )
+
+        print()
+        print(
+            f"Companies processed: "
+            f"{len(intelligence)}"
+        )
+
+        print(
+            f"Distress alerts: "
+            f"{len(alerts)}"
+        )
+
+    except Exception as e:
+
+        print()
+        print("=" * 70)
+        print("DAY 31 ERROR")
+        print("=" * 70)
+
+        print(
+            type(e).__name__,
+            ":",
+            e
+        )
+
+        import traceback
+
+        traceback.print_exc()
+
+        raise
+
+
+# ======================================================================
+# COMMAND LINE
+# ======================================================================
+
+if __name__ == "__main__":
+    main()
