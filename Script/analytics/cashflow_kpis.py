@@ -111,122 +111,150 @@ def load_data():
     finally:
         conn.close()
 
+    # ============================================================
+    # NORMALIZE FINANCIAL YEARS
+    # ============================================================
 
+    def normalize_financial_year(value):
+
+        if pd.isna(value):
+            return pd.NA
+
+        value = str(value).strip()
+
+        # Ignore TTM
+        if value.upper() == "TTM":
+            return pd.NA
+
+        # Four-digit year anywhere in the string
+        match = re.search(r"(20\d{2})", value)
+
+        if match:
+            return int(match.group(1))
+
+        # Two-digit year such as Mar-13
+        match = re.search(r"[-/](\d{2})$", value)
+
+        if match:
+            return 2000 + int(match.group(1))
+
+        return pd.NA
 
     # ============================================================
-# NORMALIZE YEAR COLUMNS
-# ============================================================
+    # APPLY YEAR NORMALIZATION
+    # ============================================================
 
-def normalize_financial_year(value):
-    """
-    Convert mixed financial-year formats into integer years.
+    cashflow["year"] = cashflow["year"].apply(
+        normalize_financial_year
+    )
 
-    Examples:
-        'Dec 2012'       -> 2012
-        'Mar 2013'       -> 2013
-        'Mar-13'         -> 2013
-        'Mar-24'         -> 2024
-        'Mar 2023 15'    -> 2023
-        'TTM'            -> NaN
-    """
-    if pd.isna(value):
-        return pd.NA
+    pnl["year"] = pnl["year"].apply(
+        normalize_financial_year
+    )
 
-    value = str(value).strip()
+    ratios["year"] = ratios["year"].apply(
+        normalize_financial_year
+    )
 
-    # Ignore non-annual TTM records
-    if value.upper() == "TTM":
-        return pd.NA
-
-    # Four-digit year anywhere in the string
-    match = re.search(r"(20\d{2})", value)
-
-    if match:
-        return int(match.group(1))
-
-    # Handle two-digit formats such as Mar-13
-    match = re.search(r"[-/](\d{2})$", value)
-
-    if match:
-        yy = int(match.group(1))
-
-        # Financial data in this project is 2011–2024
-        return 2000 + yy
-
-    return pd.NA
-
-
-    cashflow["year"] = cashflow["year"].apply(normalize_financial_year)
-    profitandloss["year"] = profitandloss["year"].apply(normalize_financial_year)
-
-    cashflow["year"] = pd.to_numeric(cashflow["year"], errors="coerce").astype("Int64")
-    profitandloss["year"] = pd.to_numeric(
-    profitandloss["year"],
-    errors="coerce"
-    ).astype("Int64")
-
-# Remove rows whose year cannot be interpreted
-    cashflow = cashflow.dropna(subset=["year"]).copy()
-    profitandloss = profitandloss.dropna(subset=["year"]).copy()
-
-# Convert nullable integer to normal integer
-    cashflow["year"] = cashflow["year"].astype(int)
-    profitandloss["year"] = profitandloss["year"].astype(int)
-
-    # --------------------------------------------------------------
-    # Numeric conversion
-    # --------------------------------------------------------------
+    # ============================================================
+    # CONVERT YEAR TO INTEGER
+    # ============================================================
 
     for df in [cashflow, pnl, ratios]:
 
-        if "year" in df.columns:
-            df["year"] = pd.to_numeric(
-                df["year"],
-                errors="coerce"
-            )
+        df["year"] = pd.to_numeric(
+            df["year"],
+            errors="coerce"
+        )
+
+        df.dropna(
+            subset=["year"],
+            inplace=True
+        )
+
+        df["year"] = df["year"].astype(int)
+
+    # ============================================================
+    # CLEAN COMPANY IDs
+    # ============================================================
+
+    for df in [companies, cashflow, pnl, ratios, sectors]:
 
         if "company_id" in df.columns:
+
             df["company_id"] = (
                 df["company_id"]
                 .astype(str)
                 .str.strip()
             )
 
-    # --------------------------------------------------------------
-    # Remove invalid rows
-    # --------------------------------------------------------------
+    # ============================================================
+    # NUMERIC CONVERSION
+    # ============================================================
 
-    cashflow = cashflow.dropna(
-        subset=["company_id", "year"]
+    cashflow_columns = [
+        "operating_activity",
+        "investing_activity",
+        "financing_activity",
+        "net_cash_flow"
+    ]
+
+    for column in cashflow_columns:
+
+        cashflow[column] = pd.to_numeric(
+            cashflow[column],
+            errors="coerce"
+        )
+
+    pnl_columns = [
+        "sales",
+        "net_profit"
+    ]
+
+    for column in pnl_columns:
+
+        pnl[column] = pd.to_numeric(
+            pnl[column],
+            errors="coerce"
+        )
+
+    ratio_columns = [
+        "free_cash_flow_cr",
+        "revenue_cagr_5yr",
+        "pat_cagr_5yr",
+        "total_debt_cr"
+    ]
+
+    for column in ratio_columns:
+
+        ratios[column] = pd.to_numeric(
+            ratios[column],
+            errors="coerce"
+        )
+
+    # ============================================================
+    # CLEAN SECTORS
+    # ============================================================
+
+    sectors["sector"] = (
+        sectors["sector"]
+        .astype(str)
+        .str.strip()
     )
 
-    pnl = pnl.dropna(
-        subset=["company_id", "year"]
-    )
+    # ============================================================
+    # LOADING SUMMARY
+    # ============================================================
 
-    ratios = ratios.dropna(
-        subset=["company_id", "year"]
-    )
+    print(f"Companies       : {len(companies)}")
+    print(f"Cash Flow rows  : {len(cashflow)}")
+    print(f"Profit & Loss   : {len(pnl)}")
+    print(f"Financial ratios: {len(ratios)}")
+    print(f"Sectors         : {len(sectors)}")
 
-    print(
-        f"Companies       : {len(companies)}"
-    )
-
-    print(
-        f"Cash Flow rows  : {len(cashflow)}"
-    )
-
-    print(
-        f"Profit & Loss   : {len(pnl)}"
-    )
-
-    print(
-        f"Financial ratios: {len(ratios)}"
-    )
-
-    print(
-        f"Sectors         : {len(sectors)}"
-    )
+    # ============================================================
+    # RETURN DATA
+    # ============================================================
 
     return (
         companies,
@@ -235,7 +263,6 @@ def normalize_financial_year(value):
         ratios,
         sectors
     )
-
 
 # ======================================================================
 # CFO QUALITY
