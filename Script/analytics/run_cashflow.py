@@ -8,7 +8,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from Script.analytics.cashflow_kpis import *
 
-conn = sqlite3.connect("db/nifty100.db")
+conn = sqlite3.connect("DB/nifty100.db")
 
 query = """
 SELECT

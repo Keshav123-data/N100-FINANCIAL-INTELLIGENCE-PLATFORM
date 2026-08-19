@@ -26,6 +26,126 @@ DISTRESS_FILE = (
 
 
 # ======================================================================
+# SIMPLE CASHFLOW KPI FUNCTIONS (For Tests & Quick Calculations)
+# ======================================================================
+
+def free_cash_flow(operating_activity, investing_activity):
+    """
+    Free Cash Flow = Operating Activity + Investing Activity
+    (Investing activity is typically negative)
+    
+    Returns:
+        float: FCF value
+    """
+    if operating_activity is None or investing_activity is None:
+        return None
+    
+    return round(operating_activity + investing_activity, 2)
+
+
+def cfo_quality_score(operating_activity, net_profit):
+    """
+    CFO Quality Score based on operating cash flow vs net profit
+    
+    Returns:
+        tuple: (score, label)
+    """
+    if operating_activity is None or net_profit is None:
+        return 0, "Insufficient Data"
+    
+    if net_profit == 0:
+        return 0, "Invalid"
+    
+    ratio = operating_activity / net_profit
+    score = min(100, max(0, ratio * 100))
+    
+    if score >= 80:
+        label = "High Quality"
+    elif score >= 60:
+        label = "Good Quality"
+    elif score >= 40:
+        label = "Moderate Quality"
+    else:
+        label = "Low Quality"
+    
+    return round(score, 2), label
+
+
+def capex_intensity(investing_activity, sales):
+    """
+    CapEx Intensity = Investing Activity / Sales
+    
+    Returns:
+        tuple: (value, label)
+    """
+    if investing_activity is None or sales is None:
+        return None, "Insufficient Data"
+    
+    if sales == 0:
+        return None, "Invalid"
+    
+    intensity = abs(investing_activity) / sales
+    
+    if intensity >= 0.10:
+        label = "Capital Intensive"
+    elif intensity >= 0.05:
+        label = "Moderate CapEx"
+    else:
+        label = "Low CapEx"
+    
+    return round(intensity, 4), label
+
+
+def fcf_conversion_rate(free_cash_flow, net_profit):
+    """
+    FCF Conversion Rate = Free Cash Flow / Net Profit * 100
+    
+    Returns:
+        float: Conversion rate %
+    """
+    if free_cash_flow is None or net_profit is None:
+        return None
+    
+    if net_profit == 0:
+        return None
+    
+    rate = (free_cash_flow / net_profit) * 100
+    
+    return round(rate, 2)
+
+
+def capital_allocation_pattern(operating_activity, capex, dividends_paid, debt_level):
+    """
+    Analyze capital allocation pattern
+    
+    Returns:
+        dict: Pattern analysis
+    """
+    if operating_activity is None or capex is None:
+        return {"pattern_label": "Insufficient Data"}
+    
+    # After CapEx, what's left?
+    after_capex = operating_activity + capex  # capex is typically negative
+    
+    if after_capex < 0:
+        pattern = "Distressed"
+    elif dividends_paid and abs(dividends_paid) > after_capex * 0.3:
+        pattern = "Shareholder Returns"
+    elif debt_level and debt_level > 0:
+        pattern = "Debt Reduction"
+    else:
+        pattern = "Growth Reinvestment"
+    
+    return {
+        "pattern_label": pattern,
+        "operating_activity": operating_activity,
+        "capex": capex,
+        "dividends": dividends_paid,
+        "debt": debt_level
+    }
+
+
+# ======================================================================
 # DATABASE
 # ======================================================================
 

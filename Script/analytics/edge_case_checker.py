@@ -2,7 +2,7 @@ import sqlite3
 import pandas as pd
 from pathlib import Path
 
-DB_PATH = "db/nifty100.db"
+DB_PATH = "DB/nifty100.db"
 
 conn = sqlite3.connect(DB_PATH)
 

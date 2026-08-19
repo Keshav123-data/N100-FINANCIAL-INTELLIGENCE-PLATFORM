@@ -4,7 +4,7 @@ from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 
-from normaliser import normalize_column_names
+from .normaliser import normalize_column_names
 
 # Load environment variables
 load_dotenv()
@@ -35,28 +35,6 @@ def load_excel(file_path):
         print(e)
 
         return None
-
-def load_excel(file_path):
-    """
-    Read an Excel file using the second row as the header.
-    """
-
-    try:
-
-        df = pd.read_excel(
-            file_path,
-            header=1
-        )
-
-        df = normalize_column_names(df)
-
-        return df
-
-    except Exception as e:
-
-        print(f"❌ Error reading {file_path.name}")
-
-        print(e)
 
         return None
 

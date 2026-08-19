@@ -679,7 +679,7 @@ conn.commit()
 # SAVE CSV
 # ============================================================
 
-output_dir = PROJECT_ROOT / "Output"
+output_dir = PROJECT_ROOT / "output"
 
 output_dir.mkdir(
     exist_ok=True
