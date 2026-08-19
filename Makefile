@@ -5,9 +5,10 @@ load:
 	python Script/ETL/loader.py
 
 test:
-	pytest
+	python Script/generate_deliverables.py --test-report
 
 report:
+	python Script/generate_deliverables.py
 	python Script/ETL/validator.py
 
 clean:
